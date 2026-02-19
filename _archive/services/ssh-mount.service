@@ -1,0 +1,27 @@
+[Unit]
+Description=Mount directories for remote access
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c "mkdir /root/{log,etc,services,bin,media,syncmerg}"
+ExecStart=-/bin/mount --bind /var/log /root/log
+ExecStart=-/bin/mount --bind /etc /root/etc
+ExecStart=-/bin/mount --bind /etc/systemd/system /root/services
+ExecStart=-/bin/mount --bind /usr/local/bin /root/bin
+ExecStart=-/bin/mount --bind /media /root/media
+ExecStart=-/bin/mount --bind /mnt/syncmerg /root/syncmerg
+
+ExecStop=-/bin/umount /root/log
+ExecStop=-/bin/umount /root/etc
+ExecStop=-/bin/umount /root/services
+ExecStop=-/bin/umount /root/bin
+ExecStop=-/bin/umount /root/media
+ExecStop=-/bin/umount /root/syncmerg
+ExecStopPost=-/bin/bash -c "/bin/rmdir /root/{log,etc,services,bin,media,syncmerg}"
+
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+

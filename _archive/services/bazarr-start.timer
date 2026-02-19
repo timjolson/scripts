@@ -1,0 +1,11 @@
+[Unit]
+Description=Start bazarr
+BindsTo=netns@vpnNS.service
+Requisite=netns@vpnNS.service radarr.service sonarr.service
+
+[Timer]
+OnCalendar=*-*-* 08:35:00
+# Persistent=true
+
+[Install]
+WantedBy=timers.target

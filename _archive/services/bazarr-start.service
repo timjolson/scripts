@@ -1,0 +1,11 @@
+[Unit]
+Description=Start Bazarr
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl start bazarr.service
+ExecStart=/usr/bin/systemctl start bazarr-stop.timer
+TimeoutStopSec=180s
+
+[Install]
+WantedBy=multi-user.target

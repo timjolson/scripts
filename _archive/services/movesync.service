@@ -1,0 +1,15 @@
+[Unit]
+Description=movesync service
+RequiresMountsFor=/mnt/nvme /mnt/SG22TB1
+
+[Service]
+Type=oneshot
+SyslogIdentifier=movesync
+
+ExecStart=/usr/local/bin/scripts/movecache.sh --src /mnt/nvme/sync --dest /mnt/SG22TB1/sync --trigger -1 --target -2 \
+--precmd "systemctl stop syncthing; sudo -u www-data php /var/www/nextcloud/occ maintenance:mode --on" --postcmd "systemctl restart syncthing; sudo -u www-data /usr/bin/php /var/www/nextcloud/occ maintenance:mode --off"
+
+KillMode=mixed
+TimeoutStopSec=180s
+
+[Install]

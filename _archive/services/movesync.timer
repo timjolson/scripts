@@ -1,0 +1,10 @@
+[Unit]
+Description=Run sync mover
+
+[Timer]
+OnCalendar=*-*-* 00:30:00
+RandomizedDelaySec=3600
+# Persistent=true
+
+[Install]
+WantedBy=timers.target
