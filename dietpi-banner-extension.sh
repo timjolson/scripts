@@ -23,9 +23,9 @@ GREEN_SEPARATOR="${aCOLOUR[0]}:$COLOUR_RESET"
 
 IFACE="tun0"
 VPN_CONNECTED=0
-timeout=5
+timeout=2
 
-WAN_IP=$(ip netns exec vpnNS curl -sSfLm 0.1 'https://dietpi.com/geoip' 2>&1)
+WAN_IP=$(ip netns exec vpnNS curl -sSfLm "$timeout" 'https://dietpi.com/geoip' 2>&1)
 WAN_IP=$(ip netns exec vpnNS curl -sSfLm "$timeout" 'https://dietpi.com/geoip' 2>&1)
 
 Check_Connected()
