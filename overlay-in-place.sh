@@ -3,19 +3,21 @@ logtofile=false
 
 source /usr/local/bin/scripts/functions.sh
 
-# Script to combine via overlay source directories with an existing destination directory.
+# Script to combine, via overlay, source directories with an existing destination directory.
 # Creates a temporary bind mount of the original destination, then mounts the overlay combined directory on top of the original destination.
 
 [ $# -ge 3 ] || { log "Usage $0 <destination dir> <temporary bind dir> <branches str> <foreground bool> [<option1> <option2> ...]"; exit 2; }
 
 dest="$1"
-bind="$2"
-branches="$3"
-foreground="$4"
-shift 4
+dest="${dest%%/}" # remove trailing slash if present
+# bind="$2"
+# bind="${bind%%/}" # remove trailing slash if present
+branches="$2"
+foreground="$3"
+shift 3
 options=("$@")
 
-log "Overlaying \"$dest\" with \"$bind\" and \"$branches\"."
+log "Overlaying \"$dest\" with \"$branches\"."
 log "Options: ${options[*]}"
 
 mergerfs_options=()
@@ -30,44 +32,58 @@ else
     fg_flag=""
 fi
 
+bind="tmp/binds/${dest##/}"
+merged="tmp/merged/${dest##/}"
+bak="tmp/orig/"
+
+
+unmount() {
+    mergerfs_pid = $1
+    fusermount -u "$dest" || { log "Failed to unmount \"$dest\"."; }
+    kill -SIGTERM "$mergerfs_pid" || { log "Failed to kill mergerfs process with PID $mergerfs_pid."; }
+    umount "$bind" || { log "Failed to unmount bind directory \"$bind\"."; }
+    umount "$merged" || { log "Failed to unmount merged directory \"$merged\"."; }
+    rm -rdf "$bind" "$merged" || { log "Failed to remove temporary directories \"$bind\" and \"$merged\"."; }
+}
+trap 'unmount $mergerfs_pid' SIGINT SIGTERM
+
 # make bind directory
+read -p "Make bind directory?..."
 [ -d "${bind}" ] || { log "Bind directory \"${bind}\" does not exist. Creating it."; mkdir -p "${bind}"; } || { log "Failed to create bind directory \"${bind}\"."; exit 1; }
+read -p "Make merged directory?..."
+[ -d "${merged}" ] || { log "Merged directory \"${merged}\" does not exist. Creating it."; mkdir -p "${merged}"; } || { log "Failed to create merged directory \"${merged}\"."; exit 1; }
+read -p "Make backup directory?..."
+[ -d "${bak}" ] || { log "Backup directory \"${bak}\" does not exist. Creating it."; mkdir -p "${bak}"; } || { log "Failed to create backup directory \"${bak}\"."; exit 1; }
 
 # bind mount the original destination directory to the temprary bind directory
-log "Bind mounting \"$dest\" to \"$bind\"."
+read -p "Bind mount \"$dest\" to \"$bind\"?..."
 mount --bind "${dest}" "${bind}" || { log "Failed to bind mount \"$dest\" to \"$bind\"."; exit 1; }
+log "Make \"$bind\" private?..."
+mount --make-private "${bind}" || { log "Failed to make \"$bind\" private."; exit 1; }
 
 # use mergerfs to overlay the source and bind directories on top of the original destination directory
-log "Mounting in-place overlay of \"$dest\"."
+read -p "Mount merge to \"$merged\"?..."
 
 /usr/bin/mergerfs \
     $fg_flag \
     "${mergerfs_opts[@]}" \
     "$branches" \
-    "$dest" || { log "Failed to mount overlay on \"$dest\"."; exit 1; }
+    "$merged" 2>&1 &
+mergerfs_pid=$!
 
-# /usr/bin/mergerfs \
-# 	# foreground?
-#     -f \
-# 	-o cache.files=partial \
-#     # recommended with cache.files!=off
-# 	-o dropcacheonclose=true \ 
-#     # https://trapexit.github.io/mergerfs/latest/config/functions_categories_policies/#policy-descriptions
-#     # =pfrd weighted random
-# 	-o category.create=ff \ 
-#     # for create operation
-# 	-o minfreespace=20G \ 
-# 	-o fsname=mergmediafs \
-# 	-o moveonenospc=true \
-#     # keep file on same filesystem when renaming
-# 	-o ignorepponrename=true \
-# 	-o func.getattr=newest \
-#     # dietpi:dietpi
-# 	-o uid=1000 \
-# 	-o gid=1000 \
-#     -o statfs-ignore=ro \
-# 	"$branches" \
-# 	"$dest"
+log "Make backup \"$dest\" to \"$bak\"?..."
+mv "${dest}" "${bak}" || { log "Failed to move original destination directory \"$dest\"."; exit 1; }
+log "Remake \"$dest\"?..."
+mkdir -p "${dest}" || { log "Failed to create new destination directory \"$dest\"."; exit 1; }
+# log "Make \"$dest\" private?..."
+# mount --make-private "${dest}" || { log "Failed to make \"$dest\" private."; exit 1; }
+log "Mount overlay of \"$merged\" back to \"$dest\"?..."
+mount --bind "${merged}" "${dest}" || { log "Failed to bind mount back to \"$dest\"."; }
+log "Mounted merge at \"$dest\"."
+
+read -p "Press Enter to unmount and exit..."
+unmount $mergerfs_pid
+
 
 # scheduling-priority (-10 default)
 # branches-mount-timeout-fail (bool)
@@ -88,6 +104,3 @@ log "Mounting in-place overlay of \"$dest\"."
 # /bin/systemd-notify --ready
 
 # https://github.com/trapexit/mergerfs/releases/download/2.41.1/mergerfs_2.41.1.debian-bookworm_amd64.deb
-
-exit 0
-
