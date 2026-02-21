@@ -35,7 +35,7 @@ log() {
 
 dest="$1"
 dest="${dest%%/}" # remove trailing slash if present
-branches="$2"
+branches_str="$2"
 
 # Check if there's a third argument for foreground option
 if [[ $# -ge 3 && "$3" != "true" && "$3" != "false" ]]; then
@@ -56,7 +56,7 @@ fi
 options=("$@")
 
 # output a summary of the configuration
-log "Overlaying \"$dest\" with \"$branches\"."
+log "Overlaying \"$dest\" with \"$branches_str\"."
 log "Options: ${options[*]}"
 
 # combine options into an array of -o options for mergerfs
@@ -79,7 +79,7 @@ merged="$temp_dir/merged-$dest"
 
 ## Handle the destination being a branch in the branches string.
 # Split branches into array by ':'.
-IFS=':' read -r -a branches_array <<< "$branches"
+IFS=':' read -r -a branches_array <<< "$branches_str"
 for i in "${!branches_array[@]}"; do
     # Remove trailing slash if present, then split into branch_base and suffix by the first '=' character.
     branches_array[$i]="${branches_array[$i]%%/}"
@@ -90,8 +90,8 @@ for i in "${!branches_array[@]}"; do
     fi
 done
 # Combine branches_array into a string delimited by ':'
-branches_combined="$(IFS=:; echo "${branches_array[*]}")"
-log "branches_combined = \"$branches_combined\""
+branches="$(IFS=:; echo "${branches_array[*]}")"
+log "branches = \"$branches\""
 
 # cleanup temporary directories and mounts on exit
 cleanup() {
@@ -121,7 +121,7 @@ read -p "Mount the merge to \"$merged\"?..."
 /usr/bin/mergerfs \
     $fg_flag \
     "${mergerfs_opts[@]}" \
-    "${branches_combined}" \
+    "${branches}" \
     "${merged}" 2>&1 | log &
 mergerfs_pid=$!
 
