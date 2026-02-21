@@ -3,10 +3,10 @@
 # Script to combine, via mergerfs overlay, branches into an existing destination directory.
 # Creates a temporary bind mount of the original destination, then mounts the merged directory on top of the original destination.
 #
-# Usage: overlay-in-place.sh <destination dir> <branches str> <foreground bool> [<option1> <option2> ...]
+# Usage: overlay-in-place.sh <destination dir> <branches str> <options formatted for mergerfs>
 # Examples: 
 #    overlay-in-place.sh /mnt/overlay "/mnt/overlay:drive2"
-#    overlay-in-place.sh /mnt/overlay "/mnt/overlay=NC:drive2" true
+#    overlay-in-place.sh "Pictures" "Pictures=NC:Video:Music" -o fsname=in-place-overlay
 # 
 # https://github.com/trapexit/mergerfs/releases/download/2.41.1/mergerfs_2.41.1.debian-bookworm_amd64.deb
 
@@ -36,41 +36,13 @@ log() {
 dest="$1"
 dest="${dest%%/}" # remove trailing slash if present
 branches_str="$2"
+shift 2
 
-# Check if there's a third argument for foreground option
-if [[ $# -ge 3 && "$3" != "true" && "$3" != "false" ]]; then
-    # third arg is not a bool
-    foreground=false
-    shift 2
-elif [[ $# -ge 3 ]]; then
-    # third arg is a bool
-    foreground="$3"
-    shift 3
-else
-    # no third arg, default to false
-    foreground=false
-    shift 2
-fi
-
-# Remaining arguments are options for mergerfs
-options=("$@")
+remaining_args=("$@")
 
 # output a summary of the configuration
 log "Overlaying \"$dest\" with \"$branches_str\"."
-log "Options: ${options[*]}"
-
-# combine options into an array of -o options for mergerfs
-mergerfs_opts=()
-for opt in "${options[@]}"; do
-    mergerfs_opts+=("-o $opt")
-done
-
-# foreground flag for mergerfs
-if [[ "$foreground" == "true" ]]; then
-    fg_flag="-f"
-else
-    fg_flag=""
-fi
+log "Remaining mergerfs args: ${remaining_args[*]}"
 
 # create temporary directories for bind mount and merged mount
 temp_dir=$(mktemp -d .XXXXXXXXXXXX)
@@ -119,10 +91,9 @@ mount --make-private "${bind}" || { log "Failed to make \"$bind\" private."; exi
 # use mergerfs to overlay the source and bind directories on top of the original destination directory
 read -p "Mount the merge to \"$merged\"?..."
 /usr/bin/mergerfs \
-    $fg_flag \
-    "${mergerfs_opts[@]}" \
     "${branches}" \
-    "${merged}" 2>&1 | log &
+    "${merged}" \
+    "${remaining_args[@]}" 2>&1 | log &
 mergerfs_pid=$!
 
 log "Mount overlay of \"$merged\" back to \"$dest\"?..."
