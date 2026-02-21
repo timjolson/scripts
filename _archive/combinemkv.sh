@@ -2,7 +2,7 @@
 logtofile=true
 dryrun=false
 
-source /usr/local/bin/scripts/functions.sh
+source "$(dirname "${BASH_SOURCE[0]}")/functions.sh"
 
 # Combine mkv files using ffmpeg. Usage: combinemkv.sh dest.mkv src1.mkv src2.mkv ...
 # Example: combinemkv.sh combined.mkv part*.mkv

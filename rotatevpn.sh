@@ -2,7 +2,7 @@
 logtofile=true
 dryrun=false
 
-source /usr/local/bin/scripts/functions.sh
+source "$(dirname "${BASH_SOURCE[0]}")/functions.sh"
 
 NUMARGS=2
 if [ $# != $NUMARGS ]; then

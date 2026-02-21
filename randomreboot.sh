@@ -5,7 +5,7 @@ dryrun=false
 # log file to read for previously scheduled reboot
 LOG_FILE="/var/log/syslog"
 
-source /usr/local/bin/scripts/functions.sh
+source "$(dirname "${BASH_SOURCE[0]}")/functions.sh"
 
 NUMARGS=2
 if [ $# != $NUMARGS ]; then

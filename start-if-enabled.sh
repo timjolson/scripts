@@ -1,6 +1,6 @@
 #!/bin/bash
 logtofile=false
-source /usr/local/bin/scripts/functions.sh
+source "$(dirname "${BASH_SOURCE[0]}")/functions.sh"
 
 # Check if at least one parameter is provided
 if [ "$#" -lt 1 ]; then

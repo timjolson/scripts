@@ -26,7 +26,7 @@
 # 		of the script, and goes in /var/log/{SCRIPTNAME}.log
 logtofile=true
 
-source /usr/local/bin/scripts/functions.sh
+source "$(dirname "${BASH_SOURCE[0]}")/functions.sh"
 
 # Default values
 declare -A DEFAULTS=(

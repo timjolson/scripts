@@ -2,7 +2,7 @@
 logtofile=true
 dryrun=false
 
-source /usr/local/bin/scripts/functions.sh
+source "$(dirname "${BASH_SOURCE[0]}")/functions.sh"
 
 # Combine dvd files using ffmpeg. Usage: combinedvd.sh dest.mpg src1.VOB src2.VOB ...
 # Example: combinedvd.sh combined.mpg *.VOB

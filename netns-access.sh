@@ -1,7 +1,7 @@
 #!/bin/bash
 logtofile=true
 
-source /usr/local/bin/scripts/functions.sh
+source "$(dirname "${BASH_SOURCE[0]}")/functions.sh"
 
 # Default values
 declare -A DEFAULTS=(
