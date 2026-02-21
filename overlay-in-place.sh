@@ -40,6 +40,11 @@ log() {
 
 dest="$1"
 dest="${dest%%/}" # remove trailing slash if present
+real_dest=$(realpath "$dest") || { log "Failed to resolve real path of \"$dest\"."; exit 1; }
+if [[ ! -d "$real_dest" ]]; then
+    log "Destination \"$dest\" does not exist or is not a directory."
+    exit 1
+fi
 branches_str="$2"
 shift 2
 
@@ -61,8 +66,9 @@ for i in "${!branches_array[@]}"; do
     # Remove trailing slash if present, then split into branch_base and suffix by the first '=' character.
     branches_array[$i]="${branches_array[$i]%%/}"
     branch_base="${branches_array[$i]%%=*}"
+    real_branch_base=$(realpath "$branch_base") || { log "Failed to resolve real path of branch \"$branch_base\"."; exit 1; }
     suffix="${branches_array[$i]#${branch_base}}"
-    if [[ "$branch_base" == "$dest" ]]; then
+    if [[ "$real_branch_base" == "$real_dest" ]]; then
         branches_array[$i]="$bind$suffix"
     fi
 done
@@ -79,18 +85,19 @@ cleanup() {
     umount "$merged" | log
     umount "$bind" | log
     rm -rdf "$temp_dir" | log
+    exit $1
 }
 trap 'cleanup' SIGINT SIGTERM EXIT
 
 read -p "Make bind and merged directories?..."
-[ -d "$bind" ] || { log "Bind directory \"$bind\" does not exist. Creating it."; mkdir -p "$bind"; } || { log "Failed to create bind directory \"$bind\"."; exit 1; }
-[ -d "$merged" ] || { log "Merged directory \"$merged\" does not exist. Creating it."; mkdir -p "$merged"; } || { log "Failed to create merged directory \"$merged\"."; exit 1; }
+[ -d "$bind" ] || { log "Bind directory \"$bind\" does not exist. Creating it."; mkdir -p "$bind"; } || { log "Failed to create bind directory \"$bind\"."; cleanup 1; }
+[ -d "$merged" ] || { log "Merged directory \"$merged\" does not exist. Creating it."; mkdir -p "$merged"; } || { log "Failed to create merged directory \"$merged\"."; cleanup 1; }
 
 # bind mount the original destination directory to the temprary bind directory
 read -p "Bind mount \"$dest\" to \"$bind\"?..."
-mount --bind "${dest}" "${bind}" || { log "Failed to bind mount \"$dest\" to \"$bind\"."; exit 1; }
+mount --bind "${dest}" "${bind}" || { log "Failed to bind mount \"$dest\" to \"$bind\"."; cleanup 1; }
 log "Make \"$bind\" private?..."
-mount --make-private "${bind}" || { log "Failed to make \"$bind\" private."; exit 1; }
+mount --make-private "${bind}" || { log "Failed to make \"$bind\" private."; cleanup 1; }
 
 # use mergerfs to overlay the source and bind directories on top of the original destination directory
 read -p "Mount the merge to \"$merged\"?..."
@@ -101,10 +108,8 @@ read -p "Mount the merge to \"$merged\"?..."
 mergerfs_pid=$!
 
 log "Mount overlay of \"$merged\" back to \"$dest\"?..."
-mount --bind "${merged}" "${dest}" || { log "Failed to bind mount back to \"$dest\"."; exit 1; }
+mount --bind "${merged}" "${dest}" || { log "Failed to bind mount back to \"$dest\"."; cleanup 1; }
 log "Mounted merge at \"$dest\"."
 
 read -p "Press Enter to unmount and exit..."
-cleanup
-
-exit 0
+cleanup 0
