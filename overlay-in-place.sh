@@ -3,10 +3,15 @@
 # Script to combine, via mergerfs overlay, branches into an existing destination directory.
 # Creates a temporary bind mount of the original destination, then mounts the merged directory on top of the original destination.
 #
+# Note: this is UNRELIABLE if "=" is in the path of any branch, as the script uses "=" to identify a specified write-mode
+# assignment for each branch.
+# 
 # Usage: overlay-in-place.sh <destination dir> <branches str> <options formatted for mergerfs>
 # Examples: 
 #    overlay-in-place.sh /mnt/overlay "/mnt/overlay:drive2"
+#    overlay-in-place.sh "Documents" "Video:Music"
 #    overlay-in-place.sh "Pictures" "Pictures=NC:Video:Music" -o fsname=in-place-overlay
+# 
 # 
 # https://github.com/trapexit/mergerfs/releases/download/2.41.1/mergerfs_2.41.1.debian-bookworm_amd64.deb
 
@@ -30,7 +35,7 @@ log() {
         echo "$message"
 }
 
-[ $# -ge 2 ] || { log "Usage $0 <destination dir> <branches str> <foreground bool> [<option1> <option2> ...]"; exit 2; }
+[ $# -ge 2 ] || { log "Usage $0 <destination dir> <branches str> <options for mergerfs>"; exit 2; }
 
 
 dest="$1"
@@ -68,15 +73,14 @@ log "branches = \"$branches\""
 # cleanup temporary directories and mounts on exit
 cleanup() {
     fusermount -u "$dest" | log
-    fusermount -u "$bind" | log
     fusermount -u "$merged" | log
+    fusermount -u "$bind" | log
     umount "$dest" | log
-    umount "$bind" | log
     umount "$merged" | log
+    umount "$bind" | log
     rm -rdf "$temp_dir" | log
 }
-mergerfs_pid=""
-trap 'cleanup $mergerfs_pid' SIGINT SIGTERM EXIT
+trap 'cleanup' SIGINT SIGTERM EXIT
 
 read -p "Make bind and merged directories?..."
 [ -d "$bind" ] || { log "Bind directory \"$bind\" does not exist. Creating it."; mkdir -p "$bind"; } || { log "Failed to create bind directory \"$bind\"."; exit 1; }
@@ -101,5 +105,6 @@ mount --bind "${merged}" "${dest}" || { log "Failed to bind mount back to \"$des
 log "Mounted merge at \"$dest\"."
 
 read -p "Press Enter to unmount and exit..."
-cleanup "$mergerfs_pid"
+cleanup
 
+exit 0
