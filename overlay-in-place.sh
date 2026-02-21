@@ -8,9 +8,9 @@
 # 
 # Usage: overlay-in-place.sh <destination dir> <branches str> <options formatted for mergerfs>
 # Examples: 
-#    overlay-in-place.sh /mnt/overlay "/mnt/overlay:drive2"
-#    overlay-in-place.sh "Documents" "Video:Music"
-#    overlay-in-place.sh "Pictures" "Pictures=NC:Video:Music" -o fsname=in-place-overlay
+#    overlay-in-place.sh Documents "Video:Music"
+#    overlay-in-place.sh "Pictures" Pictures=NC:Video:Music -o fsname=in-place-overlay
+#    overlay-in-place.sh Pictures Pictures=NC:"with space":Music
 # 
 # 
 # https://github.com/trapexit/mergerfs/releases/download/2.41.1/mergerfs_2.41.1.debian-bookworm_amd64.deb
