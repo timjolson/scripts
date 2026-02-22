@@ -62,7 +62,7 @@ merged=""
 
 make_temps() {
     # Create temporary directories for bind mount and merged mount
-    temp_dir=$(mktemp -d $dest.XXXXXXXXXXXX)
+    temp_dir=$(mktemp -d)
     bind="$temp_dir/bind-$dest"
     merged="$temp_dir/merged-$dest"
 }
