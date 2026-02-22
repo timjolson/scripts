@@ -20,18 +20,12 @@
 log() {
         local message=""
         # Check if there is piped input
-        if [ -p /dev/stdin ]; then
-            # Read from stdin if there is any input
-            read -r message || message=""  # Read from stdin, default to empty if read fails
-        fi
+        # Read from stdin, default to empty if read fails
+        [ -p /dev/stdin ] && read -r message || message=""  
         # If no piped input, check for the first argument
-        if [[ -z "$message" && $# -gt 0 ]]; then
-            message="$@"
-        fi
-        # If still no message
-        if [[ ! -z "$message" ]]; then
-            echo "$message"
-        fi
+        [[ -z "$message" && $# -gt 0 ]] && message="$@"
+        # If there is a message to log, print it
+        [[ ! -z "$message" ]] && echo "$message"
 }
 
 [ $# -ge 2 ] || { log "Usage $0 <branches> <destination> [<options for mergerfs>]"; exit 2; }
@@ -44,10 +38,7 @@ branches_in="$1"
 dest="$2"
 dest="${dest%%/}" # Remove trailing slash if any
 real_dest=$(realpath "$dest") || { log "Failed to resolve real path of \"$dest\"."; exit 1; }
-if [[ ! -d "$real_dest" ]]; then
-    log "Destination \"$dest\" does not exist or is not a directory."
-    exit 1
-fi
+[[ ! -d "$real_dest" ]] && { log "Destination \"$dest\" does not exist or is not a directory."; exit 1; }
 shift 2
 
 # Get the remaining arguments for mergerfs, if any.
@@ -59,13 +50,6 @@ inplace=false
 temp_dir=""
 bind=""
 merged=""
-
-make_temps() {
-    # Create temporary directories for bind mount and merged mount
-    temp_dir=$(mktemp -d)
-    bind="$temp_dir/bind-$dest"
-    merged="$temp_dir/merged-$dest"
-}
 
 ## Handle the target being a branch in the branches string.
 # Split branches into array by ':'.
@@ -83,7 +67,12 @@ for i in "${!branches_array[@]}"; do
     # If the real path of the branch matches the real path of the destination, replace the branch with the bind mount 
     # and flag as an in-place overlay.
     if [[ "$real_branch_base" == "$real_dest" ]]; then
-        [[ -z "$temp_dir" ]] && make_temps
+        if [[ -z "$temp_dir" ]]; then
+            # Create temporary directories for bind mount and merged mount
+            temp_dir=$(mktemp -d)
+            bind="$temp_dir/bind-$dest"
+            merged="$temp_dir/merged-$dest"
+        fi
         branches_array[$i]="$bind$suffix"
         inplace=true
     fi
