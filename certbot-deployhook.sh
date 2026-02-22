@@ -72,9 +72,6 @@ chown -R emby:dietpi $emby_dir/bak
 echo "$(date) mv emby/*.pfx $emby_dir/bak/" >> $logpath
 mv $emby_dir/*.pfx $emby_dir/bak/
 echo "$(date) openssl convert to pkcs12" >> $logpath
-# openssl pkcs12 -export -out $emby_dir/$dns_name.pfx -inkey $le_dir/$dns_name/privkey.pem -in $le_dir/$dns_name/cert.pem -certfile $le_dir/$dns_name/fullchain.pem -name $dns_name -passout pass:certpass
-# openssl pkcs12 -export -out $emby_dir/$dns_name.pfx -inkey $le_dir/$dns_name/privkey.pem -in $le_dir/$dns_name/cert.pem -certfile $le_dir/$dns_name/chain.pem -certfile $le_dir/$dns_name/fullchain.pem -name $dns_name -passout pass:certpass
-# openssl pkcs12 -export -out $emby_dir/$dns_name.pfx -inkey $le_dir/$dns_name/privkey.pem -in $le_dir/$dns_name/cert.pem -certfile $le_dir/$dns_name/chain.pem -certfile $le_dir/$dns_name/fullchain.pem -name $dns_name -passout pass:certpass
 openssl pkcs12 -export -out $emby_dir/$dns_name.pfx -inkey $le_dir/$dns_name/privkey.pem -in $le_dir/$dns_name/cert.pem -certfile $le_dir/$dns_name/chain.pem -passout pass:certpass
 echo "$(date) chown emby:dietpi" >> $logpath
 chown emby:dietpi $emby_dir/$dns_name.pfx
