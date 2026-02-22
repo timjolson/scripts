@@ -34,7 +34,7 @@ log() {
         fi
 }
 
-[ $# -ge 2 ] || { log "Usage $0 <destination> <branches> <options for mergerfs>"; exit 2; }
+[ $# -ge 2 ] || { log "Usage $0 <branches> <destination> [<options for mergerfs>]"; exit 2; }
 
 ## Get parameters
 # Incoming branches string, e.g. "Video:Music" or "Pictures=NC:Video:Music"
