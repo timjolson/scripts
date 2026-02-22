@@ -14,21 +14,13 @@ else
 	logdir="/var/log/$(basename ${0} | rev | cut -d'.' -f2- | rev).log"
 fi
 
-
-function log() {
+log() {
         local message=""
         # Check if there is piped input
-        if [ -p /dev/stdin ]; then
-                # Read from stdin if there is any input
-                read -r message || message=""  # Read from stdin, default to empty if read fails
-        fi
-
+        # Read from stdin, default to empty if read fails
+        [ -p /dev/stdin ] && read -r message || message=""  
         # If no piped input, check for the first argument
-        if [[ -z "$message" && $# -gt 0 ]]; then
-                #message="$*"
-                message="$@"
-                #message="$1"
-        fi
+        [[ -z "$message" && $# -gt 0 ]] && message="$@"
 
         # If still no message
         if [[ -z "$message" ]]; then
@@ -38,19 +30,10 @@ function log() {
 
         # log to journal
         echo "$message"
-
-        if [ "$logtofile" = true ]; then
-                # log to file with timestamp
-                echo "$(date) : $message" >> "$logdir"
-        fi
+        # log to file with timestamp
+        [ "$logtofile" = true ] && { echo "$(date) : $message" >> "$logdir"; }
 }
 
-if [ "$logtofile" = true ]; then
-	mkdir -p "$(dirname $logdir)" || { log "Error creating \"$(dirname $logdir)\"." && exit 1; }
-	log "Logging to $logdir."
-else
-	log "File logging disabled. Logging to stdout only."
-fi
 
 # Function to parse named arguments dynamically. Usage:
 # 
