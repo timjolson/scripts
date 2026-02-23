@@ -25,13 +25,14 @@ log() {
         # If still no message
         if [[ -z "$message" ]]; then
                 [[ "$debug" = true ]] && echo "Log message is blank. Called from line ${BASH_LINENO[0]}."
-                return
+                return 0
         fi
 
         # log to journal
         echo "$message"
         # log to file with timestamp
-        [ "$logtofile" = true ] && { echo "$(date) : $message" >> "$logdir"; }
+        [[ "$logtofile" = true ]] && { echo "$(date) : $message" >> "$logdir"; }
+        return 0
 }
 
 
