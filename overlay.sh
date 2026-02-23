@@ -146,6 +146,13 @@ $mergerfs_bin \
     "${remaining_args[@]}" 2>&1 | log &
 mergerfs_pid=$!
 
+# Give mergerfs a short moment to start and verify it's running before binding merged back.
+sleep 0.02
+if ! kill -0 "$mergerfs_pid" 2>/dev/null; then
+    log "mergerfs failed to start (pid $mergerfs_pid)";
+    cleanup 1
+fi
+
 # If the overlay is in-place, mount the merged directory on top of the original destination.
 if [[ "$inplace" = true ]]; then
     mount --bind "${merged}" "${dest}" || { log "Failed to bind mount back to \"$dest\"."; cleanup 1; }
