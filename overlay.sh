@@ -103,7 +103,9 @@ fi
 
 # Log the configuration
 log "Overlaying \"$dest\" with \"$branches_in\".$branch_msg"
-[[ -z "$remaining_args" ]] || log "Options for mergerfs: ${remaining_args[*]}"
+if [[ ${#remaining_args[@]} -gt 0 ]]; then
+    log "Options for mergerfs: ${remaining_args[*]}"
+fi
 
 ## Set up traps to ensure cleanup on exit or interruption, applies to the remainder of the script.
 cleanup() {
@@ -123,7 +125,7 @@ trap 'cleanup' SIGINT SIGTERM
 ## Prepare for in-place overlay handling.
 if [[ "$inplace" = true ]]; then
     # Create the bind directory (as a layer of obfuscation to prevent mergerfs from treating the original destination as a branch).
-    [ -d "$bind" ] || { mkdir -p "$bind"; } || { log "Failed to create bind directory \"$bind\"."; cleanup 1; }
+    [ -d "$bind" ] || { mkdir -p -- "$bind"; } || { log "Failed to create bind directory \"$bind\"."; cleanup 1; }
     mount --bind "${dest}" "${bind}" || { log "Failed to bind mount \"$dest\" to \"$bind\"."; cleanup 1; }
 
     # Make the bind mount private to prevent propagation of mounts/unmounts to the original destination. This prevents
@@ -131,7 +133,7 @@ if [[ "$inplace" = true ]]; then
     mount --make-private "${bind}" || { log "Failed to make \"$bind\" private."; cleanup 1; }
 
     # Create the merged directory for the mergerfs mount.
-    [ -d "$merged" ] || { mkdir -p "$merged"; } || { log "Failed to create merged directory \"$merged\"."; cleanup 1; }
+    [ -d "$merged" ] || { mkdir -p -- "$merged"; } || { log "Failed to create merged directory \"$merged\"."; cleanup 1; }
 fi
 
 
