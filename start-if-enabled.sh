@@ -8,13 +8,19 @@ if [ "$#" -lt 1 ]; then
   exit 1
 fi
 
+
 # Loop through each parameter
 for service in "$@"; do
   # Check if the service is enabled
   if systemctl is-enabled "$service" > /dev/null 2>&1; then
     log "Starting $service..."
-    systemctl start "$service"
+    if systemctl start "$service" 2>&1 | log; then
+      log "Failed to start $service."
+      exit 1
+    fi
   else
     log "$service is not enabled and cannot be started."
   fi
 done
+
+exit 0
