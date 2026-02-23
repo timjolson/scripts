@@ -28,6 +28,9 @@ log() {
         [[ ! -z "$message" ]] && echo "$message"
 }
 
+# Use dynamic lookup for mergerfs binary
+mergerfs_bin=$(command -v mergerfs) || { log "mergerfs not found in PATH."; exit 1; }
+
 [ $# -ge 2 ] || { log "Usage $0 <branches> <destination> [<options for mergerfs>]"; exit 2; }
 
 ## Get parameters
@@ -69,7 +72,7 @@ for i in "${!branches_array[@]}"; do
     if [[ "$real_branch_base" == "$real_dest" ]]; then
         if [[ -z "$temp_dir" ]]; then
             # Create temporary directories for bind mount and merged mount
-            temp_dir=$(mktemp -d)
+            temp_dir=$(mktemp -d) || { log "Failed to create temporary directory."; exit 1; }
             bind="$temp_dir/bind-$dest"
             merged="$temp_dir/merged-$dest"
         fi
@@ -98,12 +101,12 @@ log "Overlaying \"$dest\" with \"$branches_in\".$branch_msg"
 ## Set up traps to ensure cleanup on exit or interruption, applies to the remainder of the script.
 cleanup() {
     # Cleanup temporary directories and mounts on exit
-    [[ -d "$mergerfs_path" ]] && $( umount "$mergerfs_path" || fusermount -u "$mergerfs_path" ) | log
+    [[ -d "$mergerfs_path" ]] && ( umount "$mergerfs_path" || fusermount -u "$mergerfs_path" ) | log
 
     if [[ "$inplace" = true ]]; then
         # Unmount the bind mount and merged mount, and remove the temporary directory.
-        [[ -d "$dest" ]] && $( umount "$dest" || fusermount -u "$dest") | log
-        [[ ( ! -z "$bind" ) && -d "$bind" ]] && $( umount "$bind" || fusermount -u "$bind" ) | log
+        [[ -d "$dest" ]] && ( umount "$dest" || fusermount -u "$dest") | log
+        [[ ( ! -z "$bind" ) && -d "$bind" ]] && ( umount "$bind" || fusermount -u "$bind" ) | log
         [[ ( ! -z "$temp_dir" ) && -d "$temp_dir" ]] && rm -rdf "$temp_dir" | log
     fi
     exit $1
@@ -124,11 +127,12 @@ if [[ "$inplace" = true ]]; then
     [ -d "$merged" ] || { mkdir -p "$merged"; } || { log "Failed to create merged directory \"$merged\"."; cleanup 1; }
 fi
 
+
 # Do the mergerfs mount. mergerfs_path depends on whether this is an in-place overlay or not.
-/usr/bin/mergerfs \
+$mergerfs_bin \
     -f \
-    "${branches}" \
-    "${mergerfs_path}" \
+    "$branches" \
+    "$mergerfs_path" \
     -o flush-on-close=always \
     "${remaining_args[@]}" 2>&1 | log &
 mergerfs_pid=$!
