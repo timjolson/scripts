@@ -55,8 +55,15 @@ bind=""
 merged=""
 
 ## Handle the target being a branch in the branches string.
-# Split branches into array by ':'.
+# Save the original IFS value
+original_ifs="$IFS"
+
+# Split branches into array by ':'
 IFS=':' read -r -a branches_array <<< "$branches_in"
+
+# Restore the original IFS value
+IFS="$original_ifs"
+
 for i in "${!branches_array[@]}"; do
     # Remove trailing slash
     branches_array[$i]="${branches_array[$i]%%/}"
