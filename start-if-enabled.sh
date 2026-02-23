@@ -14,7 +14,12 @@ for service in "$@"; do
   # Check if the service is enabled
   if systemctl is-enabled "$service" > /dev/null 2>&1; then
     log "Starting $service..."
-    if systemctl start "$service" 2>&1 | log; then
+    output=$(systemctl start "$service" 2>&1)
+    if [[ -z "$output" ]]; then
+      # Success: no output from systemctl start
+      continue
+    else
+      log "$output"
       log "Failed to start $service."
       exit 1
     fi
