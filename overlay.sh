@@ -83,8 +83,12 @@ for i in "${!branches_array[@]}"; do
         if [[ -z "$temp_dir" ]]; then
             # Create temporary directories for bind mount and merged mount
             temp_dir=$(mktemp -d) || { log "Failed to create temporary directory."; exit 1; }
-            bind="$temp_dir/bind-$dest"
-            merged="$temp_dir/merged-$dest"
+            # Derive a safe base name from the destination while preserving parent path components
+            tmp_base="${real_dest#/}"
+            tmp_base="${tmp_base//\//_}"
+            safe_base=$(printf '%s' "$tmp_base" | LC_ALL=C tr -c 'A-Za-z0-9._-' '_')
+            bind="$temp_dir/bind-$safe_base"
+            merged="$temp_dir/merged-$safe_base"
         fi
         branches_array[$i]="$bind$suffix"
         inplace=true
