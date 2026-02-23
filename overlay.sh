@@ -4,8 +4,8 @@
 # For in-place overlays, creates temporary mounts of the destination, then mounts the merged directory on top of the destination.
 #
 # Note: this script forces "-f" so that it continues running for shutdown cleanup, and "flush-on-close=always" to help prevent data loss.
-# Note: this is UNRELIABLE if "=" is in the path of any branch, as the script uses "=" to identify a specified write-mode
-# assignment for each branch. TODO: improve the parsing logic to handle "=" in paths and recognize write-mode assignments more robustly.
+# Note: the script detects "=RW", "=RO", or "=NC" suffixes for branches to support write-mode assignments. Branch paths that end with 
+# any of these suffixes in their name will not be processed correctly. mergerfs would have this problem, as well.
 # 
 # Usage: overlay-in-place.sh <branches> <destinatino> <options formatted for mergerfs>
 # Examples: 
@@ -65,14 +65,17 @@ IFS=':' read -r -a branches_array <<< "$branches_in"
 IFS="$original_ifs"
 
 for i in "${!branches_array[@]}"; do
-    # Remove trailing slash
-    branches_array[$i]="${branches_array[$i]%%/}"
-    # Split from the first '=' (write-mode)
-    branch_base="${branches_array[$i]%%=*}"
+    # Detect only a trailing write-mode token (=NC, =RO, =RW) at the end of the branch
+    branch_entry="${branches_array[$i]}"
+    suffix=""
+    if [[ "$branch_entry" =~ ^(.*)(=NC|=RO|=RW)$ ]]; then
+        branch_base="${BASH_REMATCH[1]}"
+        suffix="${BASH_REMATCH[2]}"
+    else
+        branch_base="$branch_entry"
+    fi
     # Get the real path of the branch
     real_branch_base=$(realpath "$branch_base") || { log "Failed to resolve real path of branch \"$branch_base\"."; exit 1; }
-    # Get the '=' (write-mode)
-    suffix="${branches_array[$i]#${branch_base}}"
 
     # If the real path of the branch matches the real path of the destination, replace the branch with the bind mount 
     # and flag as an in-place overlay.
