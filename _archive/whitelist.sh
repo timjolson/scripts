@@ -2,7 +2,7 @@
 logtofile=true
 dryrun=false
 
-source "$(dirname "${BASH_SOURCE[0]}")/functions.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/../functions.sh"
 # set -x
 set +e
 

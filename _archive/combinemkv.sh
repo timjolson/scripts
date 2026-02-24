@@ -2,17 +2,23 @@
 logtofile=true
 dryrun=false
 
-source "$(dirname "${BASH_SOURCE[0]}")/functions.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/../functions.sh"
 
 # Combine mkv files using ffmpeg. Usage: combinemkv.sh dest.mkv src1.mkv src2.mkv ...
 # Example: combinemkv.sh combined.mkv part*.mkv
 
-dest=$1
+dest="$1"
 shift
 src=("$@")
 
-([[ -z "$src" ]] || [[ -z "$dest" ]]) || { log "Must provide src and dest"; exit 2; }
+[ $# -ge 2 ] || { log "Usage <destination> <sources>"; exit 2; }
+
 [ ! -n "$dest" ] && { log "Cannot access \"$dest\""; exit 2; }
+
+if [[ ${#src[@]} -le 0 ]]; then
+    log "Source files needed"
+fi
+
 log "Combining \"${src[@]}\" to \"$dest\""
 # sourcestring="concat:$(IFS='|'; echo "${src[*]}")"
 
