@@ -4,10 +4,8 @@
 # For in-place overlays, creates temporary mounts of the destination, then mounts the merged directory on top of the destination.
 #
 # Note: this script forces "-f" so that it continues running for shutdown cleanup, and "flush-on-close=always" to help prevent data loss.
-# Note: the script detects "=RW", "=RO", or "=NC" suffixes for branches to support write-mode assignments. Branch paths that end with 
-# any of these suffixes in their name will not be processed correctly. mergerfs would have this problem, as well.
 # 
-# Usage: overlay-in-place.sh <branches> <destinatino> <options formatted for mergerfs>
+# Usage: overlay-in-place.sh <branches> <destination> <options formatted for mergerfs>
 # Examples: 
 #    overlay-in-place.sh "Video:Music" Documents
 #    overlay-in-place.sh Pictures=NC:Video:Music "Pictures" -o fsname=in-place-overlay
@@ -16,6 +14,7 @@
 # 
 # https://github.com/trapexit/mergerfs/releases/download/2.41.1/mergerfs_2.41.1.debian-bookworm_amd64.deb
 
+debug=false
 
 log() {
         local message=""
@@ -25,8 +24,19 @@ log() {
         # If no piped input, check for the first argument
         [[ -z "$message" && $# -gt 0 ]] && message="$@"
         # If there is a message to log, print it
-        [[ ! -z "$message" ]] && echo "$message"
+        [[ -n "$message" ]] && echo "$message"
 }
+
+# Check if the script is running from init.
+# -ne 1 means the parent process is likely not init
+if [ "$(ps -o ppid= $$)" -ne 1 ]; then
+    # Run the script as a background process
+    "$0" "$@" & disown
+    exit 0
+else
+    # If it's running as a child of init, it's in the background
+    [[ "$debug" = true ]] && log "Running in the background with PID $$."
+fi
 
 # Use dynamic lookup for mergerfs binary
 mergerfs_bin=$(command -v mergerfs) || { log "mergerfs not found in PATH."; exit 1; }
@@ -69,7 +79,7 @@ for i in "${!branches_array[@]}"; do
     # Detect only a trailing write-mode token (=NC, =RO, =RW) at the end of the branch
     branch_entry="${branches_array[$i]}"
     suffix=""
-    if [[ "$branch_entry" =~ ^(.*)(=NC|=RO|=RW)$ ]]; then
+    if [[ "$branch_entry" =~ ^(.*)(=NC|=RO|=RW|=nc|=ro|=rw)$ ]]; then
         branch_base="${BASH_REMATCH[1]}"
         suffix="${BASH_REMATCH[2]}"
     else
@@ -110,9 +120,9 @@ else
 fi
 
 # Log the configuration
-log "Overlaying \"$dest\" with \"$branches_in\".$branch_msg"
+[[ "$debug" = true ]] && log "Overlaying \"$dest\" with \"$branches_in\".$branch_msg"
 if [[ ${#remaining_args[@]} -gt 0 ]]; then
-    log "Options for mergerfs: ${remaining_args[*]}"
+    [[ "$debug" = true ]] && log "Options for mergerfs: ${remaining_args[*]}"
 fi
 
 ## Set up traps to ensure cleanup on exit or interruption, applies to the remainder of the script.
@@ -133,6 +143,7 @@ cleanup() {
     
     # # mergerfs_path should never be mounted at this point
     # [[ -d "$mergerfs_path" ]] && ( umount "$mergerfs_path" || fusermount -u "$mergerfs_path" ) | log
+    kill -TERM "$mergerfs_pid" 2>/dev/null || true
 
     if [[ "$inplace" = true ]]; then
         # Unmount the bind mount and merged mount, and remove the temporary directory.
@@ -152,6 +163,7 @@ cleanup() {
         rm -rdf "$real_dest" | log
     fi
 
+    # if the trap was triggered by a signal or called with a status, exit with the appropriate code, otherwise exit with 0
     if [[ "$#" -gt 0 ]]; then
 		exit $exit_code
 	fi
@@ -182,7 +194,6 @@ if [[ "$inplace" = true ]]; then
     [ -d "$merged" ] || { mkdir -p -- "$merged"; } || { log "Failed to create merged directory \"$merged\"."; cleanup 1; }
 fi
 
-
 # Do the mergerfs mount. mergerfs_path depends on whether this is an in-place overlay or not.
 $mergerfs_bin \
     -f \
@@ -192,8 +203,9 @@ $mergerfs_bin \
     "${remaining_args[@]}" 2>&1 | log &
 mergerfs_pid=$!
 
+[[ "$debug" = true ]] && log "Started mergerfs with PID $mergerfs_pid."
 # Give mergerfs a short moment to start and verify it's running before binding merged back.
-sleep 0.02
+sleep 0.01
 if ! kill -0 "$mergerfs_pid" 2>/dev/null; then
     log "mergerfs failed to start (pid $mergerfs_pid)";
     cleanup 1
@@ -208,34 +220,7 @@ if [[ "$inplace" = true ]]; then
     rm -rdf "$merged" || { log "Failed to remove temporary merged directory \"$merged\"."; cleanup 1; }
 fi
 
-log "Mounted overlay at \"$dest\"."
-
-# export variables for the cleanup subshell that will be disowned
-export -f cleanup
-export mergerfs_pid
-export real_dest
-export dest
-export bind
-export temp_dir
-export made_dest
-export inplace
-export mergerfs_path
-export -f log
-
-(
-    ## TODO: offload the cleanup to another script so that we can name the disowned process
-    # Wait for the mergerfs process to exit, and then trigger cleanup. This ensures that the cleanup function 
-    # runs after mergerfs has fully unmounted, which is important for in-place overlays to prevent trying to 
-    # unmount the destination before mergerfs has released it.
-    exec -a "overlay $dest" 
-    bash -c '
-    echo "overlay $dest" > /proc/self/comm
-    while kill -0 "$mergerfs_pid" 2>/dev/null; do
-        sleep 0.5
-    done
-    cleanup' "Overlay $dest"
-) & disown
-
-# disown $mergerfs_pid
-# wait $mergerfs_pid
+[[ "$debug" = true ]] && log "Mounted overlay at \"$dest\"."
+wait $mergerfs_pid
+cleanup $? # last command (that wait was waiting for) exit status
 
