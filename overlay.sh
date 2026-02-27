@@ -41,7 +41,7 @@ branches_in="$1"
 dest="$2"
 dest="${dest%%/}" # Remove trailing slash if any
 real_dest=$(realpath "$dest") || { log "Failed to resolve real path of \"$dest\"."; exit 1; }
-[[ ! -d "$real_dest" ]] && { log "Destination \"$dest\" does not exist or is not a directory."; exit 1; }
+[[ -d "$real_dest" || ! -e "$real_dest" ]] || { log "Destination \"$dest\" exists and is not a directory."; exit 1; }
 shift 2
 
 # Get the remaining arguments for mergerfs, if any.
@@ -53,6 +53,7 @@ inplace=false
 temp_dir=""
 bind=""
 merged=""
+made_dest=false
 
 ## Handle the target being a branch in the branches string.
 # Save the original IFS value
@@ -116,18 +117,56 @@ fi
 
 ## Set up traps to ensure cleanup on exit or interruption, applies to the remainder of the script.
 cleanup() {
-    # Cleanup temporary directories and mounts on exit
-    [[ -d "$mergerfs_path" ]] && ( umount "$mergerfs_path" || fusermount -u "$mergerfs_path" ) | log
+    # # Function to cleanup temporary directories and mounts on exit
+
+    # status of last command before trap was triggered
+    trap_status=$?
+    # SIGINT = 2, SIGTERM = 15, SIGHUP = 1
+    # SIGKILL = 9, SIGSTOP = 19 (cannot be caught or ignored)
+
+    # if the function was called and not triggered, use the provided exit code argument or default to 0
+    if [[ $trap_status -ne 0 ]]; then
+        exit_code=$trap_status
+    else
+        exit_code=${1:-0}
+    fi
+    
+    # # mergerfs_path should never be mounted at this point
+    # [[ -d "$mergerfs_path" ]] && ( umount "$mergerfs_path" || fusermount -u "$mergerfs_path" ) | log
 
     if [[ "$inplace" = true ]]; then
         # Unmount the bind mount and merged mount, and remove the temporary directory.
-        [[ -d "$dest" ]] && ( umount "$dest" || fusermount -u "$dest") | log
+
+        # If the destination mount was umounted, we get a SIGHUP (1). In that case, we do not need to umount the destination again.
+        if [[ $trap_status -ne 1 ]] && [[ $trap_status -ne 0 ]]; then
+            [[ -d "$dest" ]] && ( umount "$dest" || fusermount -u "$dest") | log
+        fi
+
+        # Always unmount the bind and remove the temporary directory if they exist
         [[ ( ! -z "$bind" ) && -d "$bind" ]] && ( umount "$bind" || fusermount -u "$bind" ) | log
         [[ ( ! -z "$temp_dir" ) && -d "$temp_dir" ]] && rm -rdf "$temp_dir" | log
     fi
-    exit $1
+
+    # if we created the destination directory and it's empty, remove it
+    if [[ "$made_dest" = true ]] && [[ -d "$real_dest" ]] && [ -z "$(ls -A "$real_dest")" ] && [[ "$real_dest" != "/" ]]; then
+        rm -rdf "$real_dest" | log
+    fi
+
+    if [[ "$#" -gt 0 ]]; then
+		exit $exit_code
+	fi
+	exit 0
 }
+
+# capture failures and clean up before exiting
 trap 'cleanup' SIGINT SIGTERM
+
+
+# if the destination does not exist, create it and flag for cleanup
+if [[ ! -d "$real_dest" ]]; then
+    mkdir -p -- "$real_dest" || { log "Failed to create destination directory \"$real_dest\"."; cleanup 1; }
+    made_dest=true
+fi
 
 ## Prepare for in-place overlay handling.
 if [[ "$inplace" = true ]]; then
@@ -163,9 +202,40 @@ fi
 # If the overlay is in-place, mount the merged directory on top of the original destination.
 if [[ "$inplace" = true ]]; then
     mount --bind "${merged}" "${dest}" || { log "Failed to bind mount back to \"$dest\"."; cleanup 1; }
+
+    # clean up merged directory, it is no longer needed
+    umount "${merged}" || { log "Failed to unmount temporary merged directory \"$merged\"."; cleanup 1; }
+    rm -rdf "$merged" || { log "Failed to remove temporary merged directory \"$merged\"."; cleanup 1; }
 fi
 
 log "Mounted overlay at \"$dest\"."
-wait $mergerfs_pid
 
-cleanup 0
+# export variables for the cleanup subshell that will be disowned
+export -f cleanup
+export mergerfs_pid
+export real_dest
+export dest
+export bind
+export temp_dir
+export made_dest
+export inplace
+export mergerfs_path
+export -f log
+
+(
+    ## TODO: offload the cleanup to another script so that we can name the disowned process
+    # Wait for the mergerfs process to exit, and then trigger cleanup. This ensures that the cleanup function 
+    # runs after mergerfs has fully unmounted, which is important for in-place overlays to prevent trying to 
+    # unmount the destination before mergerfs has released it.
+    exec -a "overlay $dest" 
+    bash -c '
+    echo "overlay $dest" > /proc/self/comm
+    while kill -0 "$mergerfs_pid" 2>/dev/null; do
+        sleep 0.5
+    done
+    cleanup' "Overlay $dest"
+) & disown
+
+# disown $mergerfs_pid
+# wait $mergerfs_pid
+
