@@ -14,7 +14,7 @@
 # 
 # https://github.com/trapexit/mergerfs/releases/download/2.41.1/mergerfs_2.41.1.debian-bookworm_amd64.deb
 
-debug=false
+debug=true
 
 log() {
         local message=""
@@ -116,6 +116,9 @@ fi
 ## Set up traps to ensure cleanup on exit or interruption, applies to the remainder of the script.
 cleanup() {
     # # Function to cleanup temporary directories and mounts on exit
+    
+    # disable trapping the exit signals
+    trap - EXIT
 
     # status of last command before trap was triggered
     trap_status=$?
