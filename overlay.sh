@@ -3,7 +3,11 @@
 # Script to combine branches into an in-place overlay, via mergerfs. Supports non-in-place overlays as well.
 # For in-place overlays, creates a temporary mount of the destination, then mounts the merged directory on top of the destination.
 #
-# Note: this script forces "-f" so that it continues running for shutdown cleanup, and "flush-on-close=always" to help prevent data loss.
+# Note: this script forces `-f` so that it continues running for shutdown cleanup, and `-o flush-on-close=always` to help prevent data loss.
+#       See mergerfs documentation for details. https://trapexit.github.io/mergerfs/latest/config/flush-on-close/
+# Note: if you are merging with remote branches (network shares, etc.), `-o lazy-umount-mountpoint=true` is recommended to prevent 
+#       hanging on shutdown if the remote branch is unavailable. See mergerfs documentation for details.
+#       https://trapexit.github.io/mergerfs/latest/config/lazy-umount-mountpoint/
 # 
 # Usage: overlay.sh <branches> <destination> <options formatted for mergerfs>
 # Examples: 
@@ -11,10 +15,10 @@
 #    overlay.sh Pictures=NC:Video:Music "Pictures" -o fsname=in-place-overlay
 #    overlay.sh Pictures=NC:"with space":Music Pictures
 # 
-# 
-# https://github.com/trapexit/mergerfs/releases/download/2.41.1/mergerfs_2.41.1.debian-bookworm_amd64.deb
+# This script was tested with mergerfs version 2.41.1
+# https://github.com/trapexit/mergerfs/releases
 
-debug=true
+debug=false
 
 log() {
         local message=""
