@@ -24,8 +24,9 @@ log() {
         # If no piped input, check for the first argument
         [[ -z "$message" && $# -gt 0 ]] && message="$@"
         # If there is a message to log, print it
-        [[ -n "$message" ]] && echo "$message"
+        [[ -n "$message" ]] && echo "$basename: $message"
 }
+basename=$(basename ${0})
 
 # Use dynamic lookup for mergerfs binary
 mergerfs_bin=$(command -v mergerfs) || { log "mergerfs not found in PATH."; exit 1; }
