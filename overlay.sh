@@ -1,15 +1,15 @@
 #!/bin/bash
 
 # Script to combine branches into an in-place overlay, via mergerfs. Supports non-in-place overlays as well.
-# For in-place overlays, creates temporary mounts of the destination, then mounts the merged directory on top of the destination.
+# For in-place overlays, creates a temporary mount of the destination, then mounts the merged directory on top of the destination.
 #
 # Note: this script forces "-f" so that it continues running for shutdown cleanup, and "flush-on-close=always" to help prevent data loss.
 # 
-# Usage: overlay-in-place.sh <branches> <destination> <options formatted for mergerfs>
+# Usage: overlay.sh <branches> <destination> <options formatted for mergerfs>
 # Examples: 
-#    overlay-in-place.sh "Video:Music" Documents
-#    overlay-in-place.sh Pictures=NC:Video:Music "Pictures" -o fsname=in-place-overlay
-#    overlay-in-place.sh Pictures=NC:"with space":Music Pictures
+#    overlay.sh "Video:Music" Documents
+#    overlay.sh Pictures=NC:Video:Music "Pictures" -o fsname=in-place-overlay
+#    overlay.sh Pictures=NC:"with space":Music Pictures
 # 
 # 
 # https://github.com/trapexit/mergerfs/releases/download/2.41.1/mergerfs_2.41.1.debian-bookworm_amd64.deb
@@ -26,17 +26,6 @@ log() {
         # If there is a message to log, print it
         [[ -n "$message" ]] && echo "$message"
 }
-
-# Check if the script is running from init.
-# -ne 1 means the parent process is likely not init
-if [ "$(ps -o ppid= $$)" -ne 1 ]; then
-    # Run the script as a background process
-    "$0" "$@" & disown
-    exit 0
-else
-    # If it's running as a child of init, it's in the background
-    [[ "$debug" = true ]] && log "Running in the background with PID $$."
-fi
 
 # Use dynamic lookup for mergerfs binary
 mergerfs_bin=$(command -v mergerfs) || { log "mergerfs not found in PATH."; exit 1; }
@@ -63,7 +52,6 @@ inplace=false
 temp_dir=""
 bind=""
 merged=""
-made_dest=false
 
 ## Handle the target being a branch in the branches string.
 # Save the original IFS value
@@ -131,6 +119,7 @@ cleanup() {
 
     # status of last command before trap was triggered
     trap_status=$?
+    [[ "$debug" = true ]] && log "trap_status: $trap_status"
     # SIGINT = 2, SIGTERM = 15, SIGHUP = 1
     # SIGKILL = 9, SIGSTOP = 19 (cannot be caught or ignored)
 
@@ -140,45 +129,38 @@ cleanup() {
     else
         exit_code=${1:-0}
     fi
-    
-    # # mergerfs_path should never be mounted at this point
-    # [[ -d "$mergerfs_path" ]] && ( umount "$mergerfs_path" || fusermount -u "$mergerfs_path" ) | log
-    kill -TERM "$mergerfs_pid" 2>/dev/null || true
+    [[ "$debug" = true ]] && log "exit_code: $exit_code"
+
+    # If the destination mount was unmounted, we get a SIGHUP (1). In that case, we do not need to unmount the destination again.
+    if [[ $trap_status -ne 1 ]] && [[ $trap_status -ne 0 ]]; then
+        [[ "$debug" = true ]] && log "Unmounting destination \"$dest\"."
+        [[ -d "$dest" ]] && ( umount "$dest" || fusermount -u "$dest") | log
+        [[ "$debug" = true ]] && log "Unmounted destination \"$dest\"."
+    fi
 
     if [[ "$inplace" = true ]]; then
+        [[ "$debug" = true ]] && log "Inplace overlay cleanup initiated."
         # Unmount the bind mount and merged mount, and remove the temporary directory.
-
-        # If the destination mount was umounted, we get a SIGHUP (1). In that case, we do not need to umount the destination again.
-        if [[ $trap_status -ne 1 ]] && [[ $trap_status -ne 0 ]]; then
-            [[ -d "$dest" ]] && ( umount "$dest" || fusermount -u "$dest") | log
-        fi
 
         # Always unmount the bind and remove the temporary directory if they exist
         [[ ( ! -z "$bind" ) && -d "$bind" ]] && ( umount "$bind" || fusermount -u "$bind" ) | log
+        [[ "$debug" = true ]] && log "Unmounted bind mount at \"$bind\"."
         [[ ( ! -z "$temp_dir" ) && -d "$temp_dir" ]] && rm -rdf "$temp_dir" | log
-    fi
-
-    # if we created the destination directory and it's empty, remove it
-    if [[ "$made_dest" = true ]] && [[ -d "$real_dest" ]] && [ -z "$(ls -A "$real_dest")" ] && [[ "$real_dest" != "/" ]]; then
-        rm -rdf "$real_dest" | log
+        [[ "$debug" = true ]] && log "Removed temporary directory \"$temp_dir\"."
     fi
 
     # if the trap was triggered by a signal or called with a status, exit with the appropriate code, otherwise exit with 0
     if [[ "$#" -gt 0 ]]; then
+        [[ "$debug" = true ]] && log "Exiting with code $exit_code."
 		exit $exit_code
 	fi
+    [[ "$debug" = true ]] && log "Exiting without a code (0)."
 	exit 0
 }
 
 # capture failures and clean up before exiting
 trap 'cleanup' SIGINT SIGTERM
 
-
-# if the destination does not exist, create it and flag for cleanup
-if [[ ! -d "$real_dest" ]]; then
-    mkdir -p -- "$real_dest" || { log "Failed to create destination directory \"$real_dest\"."; cleanup 1; }
-    made_dest=true
-fi
 
 ## Prepare for in-place overlay handling.
 if [[ "$inplace" = true ]]; then
@@ -216,7 +198,7 @@ if [[ "$inplace" = true ]]; then
     mount --bind "${merged}" "${dest}" || { log "Failed to bind mount back to \"$dest\"."; cleanup 1; }
 
     # clean up merged directory, it is no longer needed
-    umount "${merged}" || { log "Failed to unmount temporary merged directory \"$merged\"."; cleanup 1; }
+    umount "${merged}" || { log "Failed to umount temporary merged directory \"$merged\"."; cleanup 1; }
     rm -rdf "$merged" || { log "Failed to remove temporary merged directory \"$merged\"."; cleanup 1; }
 fi
 
