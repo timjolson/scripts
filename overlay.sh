@@ -117,12 +117,12 @@ fi
 ## Set up traps to ensure cleanup on exit or interruption, applies to the remainder of the script.
 cleanup() {
     # # Function to cleanup temporary directories and mounts on exit
-    
+    trap_status=$?
+
     # disable trapping the exit signals
     trap - EXIT
 
     # status of last command before trap was triggered
-    trap_status=$?
     [[ "$debug" = true ]] && log "trap_status: $trap_status"
     # SIGINT = 2, SIGTERM = 15, SIGHUP = 1
     # SIGKILL = 9, SIGSTOP = 19 (cannot be caught or ignored)
@@ -138,7 +138,7 @@ cleanup() {
     # If the destination mount was unmounted, we get a SIGHUP (1). In that case, we do not need to unmount the destination again.
     if [[ $trap_status -ne 1 ]] && [[ $trap_status -ne 0 ]]; then
         [[ "$debug" = true ]] && log "Unmounting destination \"$dest\"."
-        [[ -d "$dest" ]] && ( umount "$dest" || fusermount -u "$dest") | log
+        [[ -d "$dest" ]] && umount "$dest" | log
         [[ "$debug" = true ]] && log "Unmounted destination \"$dest\"."
     fi
 
@@ -147,23 +147,43 @@ cleanup() {
         # Unmount the bind mount and merged mount, and remove the temporary directory.
 
         # Always unmount the bind and remove the temporary directory if they exist
-        [[ ( ! -z "$bind" ) && -d "$bind" ]] && ( umount "$bind" || fusermount -u "$bind" ) | log
+        [[ ( ! -z "$bind" ) && -d "$bind" ]] && umount "$bind" | log
         [[ "$debug" = true ]] && log "Unmounted bind mount at \"$bind\"."
         [[ ( ! -z "$temp_dir" ) && -d "$temp_dir" ]] && rm -rdf "$temp_dir" | log
         [[ "$debug" = true ]] && log "Removed temporary directory \"$temp_dir\"."
     fi
 
-    # if the trap was triggered by a signal or called with a status, exit with the appropriate code, otherwise exit with 0
-    if [[ "$#" -gt 0 ]]; then
-        [[ "$debug" = true ]] && log "Exiting with code $exit_code."
-		exit $exit_code
-	fi
-    [[ "$debug" = true ]] && log "Exiting without a code (0)."
-	exit 0
+    [[ "$debug" = true ]] && log "Exiting with code $exit_code."
+    exit $exit_code
+}
+
+dismount() {
+    # # do umount for a regular mergerfs overlay
+    trap_status=$?
+    trap - EXIT
+    [[ "$debug" = true ]] && log "trap_status: $trap_status"
+
+    # if the function was called and not triggered, use the provided exit code argument or default to 0
+    if [[ $trap_status -ne 0 ]]; then
+        exit_code=$trap_status
+    else
+        exit_code=${1:-0}
+    fi
+    [[ "$debug" = true ]] && log "exit_code: $exit_code"
+
+    # If the destination mount was unmounted, we get a SIGHUP (1). In that case, we do not need to unmount the destination again.
+    if [[ $trap_status -ne 1 ]] && [[ $trap_status -ne 0 ]]; then
+        [[ "$debug" = true ]] && log "Unmounting destination \"$dest\"."
+        [[ -d "$dest" ]] && umount "$dest" || log "Failed to unmount destination \"$dest\"."
+        [[ "$debug" = true ]] && log "Unmounted destination \"$dest\"."
+    fi
+
+    [[ "$debug" = true ]] && log "Exiting with code $exit_code."
+    exit $exit_code
 }
 
 # capture failures and clean up before exiting
-trap 'cleanup' SIGINT SIGTERM
+trap 'cleanup' EXIT SIGINT SIGTERM
 
 
 ## Prepare for in-place overlay handling.
@@ -204,9 +224,13 @@ if [[ "$inplace" = true ]]; then
     # clean up merged directory, it is no longer needed
     umount "${merged}" || { log "Failed to umount temporary merged directory \"$merged\"."; cleanup 1; }
     rm -rdf "$merged" || { log "Failed to remove temporary merged directory \"$merged\"."; cleanup 1; }
+else
+    # running a standard mergerfs mount, so we just wait for it to exit. no clean up needed.
+    trap - EXIT SIGTERM SIGINT
+    trap 'dismount' EXIT SIGINT SIGTERM
 fi
 
 [[ "$debug" = true ]] && log "Mounted overlay at \"$dest\"."
 wait $mergerfs_pid
-cleanup $? # last command (that wait was waiting for) exit status
+exit $? # last command (that wait was waiting for) exit status
 
