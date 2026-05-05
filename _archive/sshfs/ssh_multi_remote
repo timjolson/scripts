@@ -1,0 +1,19 @@
+#!/bin/bash
+
+tab=" --tab"
+options=()
+ssh_="ssh -i ~/.ssh/id_rsa "
+vars=($*)
+
+for i in ${!vars[@]}; do
+	rem=$(($i % 2))
+	if [ "$rem" -ne "0" ]; then
+		echo $tab --title="${vars[i]}" -e "bash -c \"${ssh_}${vars[i-1]}\""
+		options+=($tab --title="${vars[i]}" -e "bash -c \"${ssh_}${vars[i-1]}\"")
+	fi
+done
+
+gnome-terminal "${options[@]}"
+
+exit 0
+

@@ -1,0 +1,24 @@
+# package folders
+amd64
+x86
+armhf
+arm64
+ia64
+x86_64
+sparc64
+installs/amd64
+installs/x86
+installs/armhf
+installs/arm64
+installs/ia64
+installs/x86_64
+installs/sparc64
+
+# other folders
+redis
+installs/redis
+installs/files/ros2
+
+logs
+logs/*
+**.log

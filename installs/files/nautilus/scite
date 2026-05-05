@@ -1,0 +1,17 @@
+#!/bin/bash
+
+needroot=0
+
+for file in $NAUTILUS_SCRIPT_SELECTED_FILE_PATHS
+do
+ #if ($( sudo -u $USER [ ! -w $file ] ))
+ #if !($( sudo -u $USER test -w $file ))
+ if [ ! -w $file ]
+  then needroot=1
+ fi
+done
+
+if [ $needroot = "1" ]
+ then gnome-terminal --working-directory=$(dirname $NAUTILUS_SCRIPT_SELECTED_FILE_PATHS) -e "sudo scite $NAUTILUS_SCRIPT_SELECTED_FILE_PATHS" & disown & exit
+ else scite $NAUTILUS_SCRIPT_SELECTED_FILE_PATHS & disown & exit
+fi

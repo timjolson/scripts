@@ -1,0 +1,23 @@
+[Unit]
+Description=Named network namespace %i
+JoinsNamespaceOf=netns@%i.service
+# BindsTo=netns-access@%i.service
+PartOf=%i.service
+After=syslog.target network.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=true
+PrivateNetwork=true
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=netns-%i
+
+# Start process
+ExecStart=/usr/local/bin/scripts/netns.sh start %i
+
+# Stop process
+ExecStop=/usr/local/bin/scripts/netns.sh stop %i
+
+[Install]
+

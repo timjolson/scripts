@@ -1,0 +1,14 @@
+[Unit]
+Description=Generate a random reboot
+
+[Service]
+Type=oneshot
+SyslogIdentifier=randomreboot
+
+#ExecStartPre=/boot/dietpi/dietpi-services restart dietpi-dashboard
+ExecStart=/usr/local/bin/scripts/randomreboot.sh 2 3600
+
+KillMode=mixed
+TimeoutStopSec=180s
+
+[Install]

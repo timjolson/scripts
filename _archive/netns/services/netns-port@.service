@@ -1,0 +1,37 @@
+[Unit]
+Description=Forwarding port %i
+After=syslog.target network.target
+StartLimitIntervalSec=2
+StopWhenUnneeded=true
+
+[Service]
+Type=simple
+StandardOutput=journal
+StandardError=journal
+SuccessExitStatus=143
+RemainAfterExit=true
+SyslogIdentifier=netns-port-%i
+
+# Extract namespace and port from %i
+# Environment="namespace=%i"
+# Environment="port=%i"
+# ExecStartPre=/usr/bin/bash -c 'namespace="${namespace%@*}"; port="${namespace#*@}"; echo "namespace=$namespace port=$port" > /tmp/netns-port-%i.env'
+# EnvironmentFile=/tmp/netns-port-%i.env
+
+# Start process
+# ExecStart=/usr/bin/socat tcp-listen:${namespace#*@},fork exec:'ip netns exec ${namespace%@*} socat STDIO "tcp-connect:127.0.0.1:${namespace#*@}"',nofork
+# Backup
+ExecStart=/usr/local/bin/scripts/netns-port.sh %i
+
+# Cleanup environment file
+# ExecStopPost=/usr/bin/bash -c 'rm -f /tmp/netns-port-%i.env'
+
+# Restart=on-failure
+TimeoutStartSec=5
+TimeoutStopSec=30
+#Slice=vpn.slice
+
+[Install]
+#WantedBy=multi-user.target
+#WantedBy=network-online.target
+

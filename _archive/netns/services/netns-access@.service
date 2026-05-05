@@ -1,0 +1,29 @@
+[Unit]
+Description=Named network namespace access %I
+After=syslog.target network.target netns@%i.service
+Before=%i.service
+BindsTo=netns@%i.service
+# JoinsNamespaceOf=netns@%i.service
+# StopWhenUnneeded=true
+
+[Service]
+Type=oneshot
+RemainAfterExit=true
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=netns-access
+
+# Run script to configure the namespace
+# ExecStartPre=-umount /etc/netns/%i
+# ExecStartPre=-rm -rdf /etc/netns/%i
+ExecStart=/usr/bin/bash /usr/local/bin/scripts/netns-access.sh start --namespace %i
+
+# post-start script
+ExecStart=-/usr/bin/env bash -c "if [[ -e "/usr/local/bin/scripts/ns-%i" ]]; then bash /usr/local/bin/scripts/ns-%i.sh start; fi"
+
+# stop script
+ExecStop=-/usr/bin/env bash -c "if [[ -e "/usr/local/bin/scripts/ns-%i" ]]; then bash /usr/local/bin/scripts/ns-%i.sh stop; fi"
+ExecStop=/usr/bin/bash /usr/local/bin/scripts/netns-access.sh stop --namespace %i
+
+[Install]
+

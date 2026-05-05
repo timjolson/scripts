@@ -1,0 +1,4 @@
+#!/bin/bash
+
+# unmount files
+sudo umount $*

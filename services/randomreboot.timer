@@ -1,0 +1,9 @@
+[Unit]
+Description=Run reboot scheduler
+
+[Timer]
+OnCalendar=*-*-* 1:53:00
+
+
+[Install]
+WantedBy=timers.target

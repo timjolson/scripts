@@ -1,0 +1,15 @@
+[Unit]
+Description=Record WAN IP to whitelist
+Requisite=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# StandardOutput=tty
+ExecStartPre=/usr/bin/sleep 60
+ExecStart=/usr/bin/bash -c "echo \"$(date) $(/usr/bin/curl -sSfLm 6 ipinfo.io/ip)\" > \"/var/log/whitelist.log\""
+ExecStart=/usr/bin/bash -c "echo \"$(date) $(curl -sSfLm 6 "https://dietpi.com/geoip" 2>&1)\" > \"/var/log/whitelist.log\""
+
+[Install]
+WantedBy=multi-user.target
+WantedBy=fail2ban.service

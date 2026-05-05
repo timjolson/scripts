@@ -1,0 +1,6 @@
+#!/bin/bash
+
+# https://stackoverflow.com/a/46205560/8473819
+
+echo running on detached screen : $@
+screen -d -m bash -c "$*"

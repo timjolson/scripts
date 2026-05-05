@@ -1,0 +1,94 @@
+#! /bin/bash
+
+# Python packages
+packages=""
+
+# Get the machine Architecture
+Architecture=$(uname -m)
+case "$Architecture" in
+    x86)       Architecture="x86";;
+    ia64)      Architecture="ia64";;
+    i?86)      Architecture="x86";;
+    amd64)     Architecture="amd64";;
+    x86_64)    Architecture="x86_64";;
+    sparc64)   Architecture="sparc64";;
+    armv7l)    Architecture="armhf";;
+    * ) echo "Your Architecture '$Architecture' -> ITS NOT SUPPORTED."; exit 1;;
+esac
+
+if [ $Architecture = "x86_64" ]
+then Architecture="amd64"
+fi
+
+# Default download path
+BACKUP_PATH="./$Architecture/packages_python"
+mkdir -p $BACKUP_PATH
+DOWN_FLAG=0
+RESTORE_FLAG=0
+INSTALL_FLAG=0
+
+# Structure inspired by http://linuxcommand.org/lc3_wss0120.php
+HELP()
+{
+    echo "usage:"
+    echo "python_pkgs [[-d] [-i] [-b backup_path] [-p \"list of packages\"]]"
+    echo "-d: download packages"
+    echo "-i: install packages"
+    echo "-b: backup path for store/restore/install"
+    echo "-p: packages to install (as single argument)"
+}
+
+if [ $# -eq 0 ]; then
+HELP
+fi
+
+while [ "$1" != "" ]; do
+    case $1 in
+        -d )       DOWN_FLAG=1
+                   ;;
+        -p )       shift
+                   packages="$1"
+                   ;;
+        -b )       shift
+                   BACKUP_PATH="$1"
+                   ;;
+        -i )       INSTALL_FLAG=1
+                   ;;
+        * )        HELP
+                   exit 1
+    esac
+    shift
+done
+
+if [ "$DOWN_FLAG" = "1" ]; then
+    mkdir -p "$BACKUP_PATH"
+    BACKUP_PATH="$(readlink -f $"$BACKUP_PATH"/)"
+
+    printf $"*****\nDownloading PYTHON packages to \n[$BACKUP_PATH]\n*****\n"
+    pip3 download -d "$BACKUP_PATH" $packages
+
+    printf $"*****\nFinished downloading PYTHON packages.\n*****\n"
+fi
+
+if [ "$INSTALL_FLAG" = "1" ]; then
+    BACKUP_PATH="$(readlink -f "$BACKUP_PATH")"
+    printf $"*****\nInstalling PYTHON packages from \n[$BACKUP_PATH]\n*****\n"
+    if [ "$packages" == "" ]; then
+         add=$(ls $BACKUP_PATH/*.whl 2>/dev/null)
+         if [ "$add" != "" ]; then
+              packages+=$add
+         else
+              echo "no *.whl found"
+         fi
+         packages+=" "
+         add=$(ls $BACKUP_PATH/*.tar.gz 2>/dev/null)
+         if [ "$add" != "" ]; then
+              packages+=$add
+         else
+              echo "no *.tar.gz found"
+         fi
+    fi
+    pip3 install --no-index ${packages[@]} --find-links="$BACKUP_PATH"
+    printf $"*****\nFinished installing PYTHON packages.\n*****\n"
+fi
+

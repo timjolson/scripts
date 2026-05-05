@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=Easytether
+Exec=sh -c "sudo easytether-usb | easytether-bluetooth D8:0B:9A:FD:C9:F1"
+Terminal=true
+Type=Application
+Comment[en_US.UTF-8]=systemctl enable systemd-networkd; systemctl start systemd-networkd

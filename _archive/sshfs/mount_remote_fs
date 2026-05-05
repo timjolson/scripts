@@ -1,0 +1,12 @@
+#!/bin/bash
+
+remote=$1
+target=$2
+
+# mount files
+mkdir -p $target
+sshfs -o IdentityFile=~/.ssh/id_rsa $remote $target
+
+# open file manager
+nautilus $target
+

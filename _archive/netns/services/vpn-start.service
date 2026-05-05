@@ -1,0 +1,37 @@
+[Unit]
+Description=VPN Client (custom)
+Wants=network-online.target
+After=network-online.target netns-access@vpnNS.service netns@vpnNS.service
+BindsTo=netns-access@vpnNS.service
+JoinsNamespaceOf=netns@vpnNS.service
+#StopWhenUnneeded=true
+
+[Service]
+Type=notify
+#ExecStart=sysctl -w net.ipv6.conf.eth0.disable_ipv6=1
+ExecStartPre=/usr/local/bin/scripts/randomfile.sh "/usr/local/bin/configs/ovpn/client-*.ovpn" /etc/openvpn/client.ovpn
+ExecStart=/usr/sbin/openvpn --suppress-timestamps --nobind --config /etc/openvpn/client.ovpn
+Restart=on-failure
+KillMode=process
+RemainAfterExit=true
+
+# Hardenings
+PrivateTmp=true
+CapabilityBoundingSet=CAP_IPC_LOCK CAP_NET_ADMIN CAP_NET_RAW CAP_SETGID CAP_SETUID CAP_SYS_CHROOT CAP_DAC_OVERRIDE
+LimitNPROC=10
+DeviceAllow=/dev/null rw
+DeviceAllow=/dev/net/tun rw
+ProtectSystem=true
+ProtectHome=true
+
+CPUAccounting = true
+BlockIOAccounting = true
+MemoryAccounting = true
+TasksAccounting = true
+PrivateNetwork = true
+PrivateTmp = true
+#Slice=vpn.slice
+
+[Install]
+# WantedBy=multi-user.target
+WantedBy=netns-access@vpnNS.service

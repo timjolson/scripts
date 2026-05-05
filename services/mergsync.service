@@ -1,0 +1,39 @@
+[Unit]
+Description=sync mergerfs service
+RequiresMountsFor=/mnt/nvme /mnt/dietpi_userdata
+Before=syncthing.service
+ConditionPathExists=/mnt/nvme/sync
+ConditionPathExists=/mnt/dietpi_userdata/sync
+StopWhenUnneeded=true
+
+[Service]
+Type=simple
+UMask=002
+Group=1000
+
+StandardOutput=journal
+StandardError=journal
+
+ExecStartPre=/usr/bin/mkdir -p -- /mnt/syncmerg
+ExecStart=/usr/bin/mergerfs \
+	-f \
+	-o cache.files=partial \
+	-o dropcacheonclose=true \
+	-o category.create=ff \
+	-o minfreespace=10G \
+	-o fsname=mergsyncfs \
+	-o ignorepponrename=true \
+	-o moveonenospc=true \
+	-o func.getattr=newest \
+	/mnt/nvme/sync:/mnt/dietpi_userdata/sync=NC \
+	/mnt/syncmerg
+
+ExecStopPost=/usr/bin/bash -c '[[ -d /mnt/syncmerg && -z "$(ls -A /mnt/syncmerg/)" ]] && /usr/bin/rm -rf /mnt/syncmerg'
+
+Restart=on-failure
+TimeoutStopSec=50s
+#Slice=merge.slice
+
+[Install]
+WantedBy=syncthing.service
+# WantedBy=default.target
