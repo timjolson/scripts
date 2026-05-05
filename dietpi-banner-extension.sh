@@ -57,6 +57,9 @@ print_state() {
                 "$GREEN_BULLET" "${aCOLOUR[6]}" "$subtitle" "$GREEN_SEPARATOR" "$state"
 }
 
+## Curl timeout for public IP check (seconds)
+timeout=2
+
 ###
 ### Netns WAN status and traffic check
 ###
@@ -83,6 +86,7 @@ DATA_USAGE(){
                 ip_cmd_prefix=(ip netns exec "$netns")
         fi
 
+        # TODO: get the full `ip link show` then process it through a case statement that matches the interfaces array. This will be much faster than running `ip link show` for each interface.
         for IFACE in "${interfaces[@]}"; do
                 if "${ip_cmd_prefix[@]}" ip link show "$IFACE" > /dev/null 2>&1; then
                         local RX="N/A" TX="N/A" rx tx ip_addr ip_addr_cidr
@@ -137,16 +141,16 @@ err_re='timed out|timeout|resolve|could not resolve|name or service not known'
 get_public_ip() {
         local ns="$1"
         if [[ -n "$ns" ]]; then
-                ip netns exec "$ns" curl -sSfLm 1 'https://dietpi.com/geoip' 2>&1
+                ip netns exec "$ns" curl -sSfLm $timeout 'https://dietpi.com/geoip' 2>&1
         else
-                curl -sSfLm 1 'https://dietpi.com/geoip' 2>&1
+                curl -sSfLm $timeout 'https://dietpi.com/geoip' 2>&1
         fi
 }
 
 mapfile -t namespaces < <(ip netns ls | awk 'NF>1 { print $1 }')
 # Prepend an empty entry so the default (root) namespace can be handled in the loop
 namespaces=( "" "${namespaces[@]}" )
-if [[ ${#namespaces[@]} -gt 0 ]]; then
+# if [[ ${#namespaces[@]} -gt 0 ]]; then
         print_header "Network Traffic by Namespace"
         for ns in "${namespaces[@]}"; do
                 raw_ns="${ns:-default}"
@@ -182,7 +186,7 @@ if [[ ${#namespaces[@]} -gt 0 ]]; then
                 fi
                 
         done
-fi
+# fi
 
 
 print_header "Used Disk Space"
@@ -195,6 +199,7 @@ else
 fi
 
 
+# TODO: is there a more efficient reader than df (stat?)
 # Use df's output to parse numeric fields (kB units) for mounts matching the supplied patterns
 length=0
 results=()
