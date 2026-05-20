@@ -34,6 +34,7 @@ pmc(){
 case "$CMD" in
 
     "update-images")
+        shift
         log "Updating images..."
 
         # FILTER="ghcr.io/hotio"
