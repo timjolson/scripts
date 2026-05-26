@@ -13,6 +13,12 @@
 #   with additional provided options, with a couple overrides explained below. Files are moved in order of 
 #   oldest modification time first, until either the `src` usage % is below `target`, `dest` free space 
 #   is below `min_dest_space`, there are no more files to move, or rclone stops the transfer for any reason.
+#	with --check-first as its only option (unless dryrun is true, then `--dry-run -v` are added). Files are moved in order of 
+#    oldest modification time first, until either the `src` usage % is below `target`, there are no more files to move,
+#	or the destination runs out of space.
+# 
+#	Optional (TODO) is rsync as a move method, and further option (TODO) of setting specific rsync options.
+#	Default rsync options include as many attributes as available ( rsync -aSHAXWERm --delay-updates --preallocate --relative --remove-source-files )
 # 
 # Args
 #	`src` directory ( use basic syntax, absolute path, and end with '/' )
@@ -23,14 +29,17 @@
 #   `precmd` command to run before beginning transfer (does not execute when dryrun is true or no files are to be moved)
 #   `postcmd` command to run after finishing transfer (does not execute when dryrun is true or no files were moved)
 #	`dryrun|dry-run` boolean to indicate whether to do a dry run (true) or real run (false)
+#	`batch` integer number of files to move per batch (10) larger batches are more efficient for large number of files
 #	`debug` boolean to indicate whether to log debug information (true) or not (false)
 #	`min-dest-space` minimum free space required on destination to proceed with transfer.
 #		Bare numbers are interpreted as bytes. Suffixes `B`, `KB`, `MB`, `GB`, and percentages
 #		like `15%` are also accepted. (default `0` = 0 bytes)
+#   `transferuser` user to run rclone move command as, if different from the script runner (default is the script runner's user)
 #
 # If the `src` filesystem usage % is greater than `trigger`, moves the oldest file from `src` to `dest`, 
 #	maintaining the source directory structure. This repeats until either there are no files left to move
-#	in `src` or `src` usage % is lower than `target`.
+#	in `src` or `src` usage % is lower than `target`. After all transfers are complete, uses `find`
+#	command to delete empty directories in the `src` folder.
 #
 # Shutdown behavior:
 # 	-On `SIGTERM`/`SIGHUP`, the script records the in-progress transfer context, runs cleanup,
@@ -82,6 +91,9 @@ dryrun=false
 debug=false
 min_dest_space="0"    # 0 bytes
 logto="/dev/null"
+batch=10
+transferuser=""
+logtofile=false
 
 
 log() {
@@ -193,13 +205,23 @@ termination_signal=""
 termination_exit_code=0
 run_postcmd_on_termination=true
 finalizing=false
+current_file_src_path=""
+current_dest_dir=""
 finish_actions_attempted=false
+scriptuser="$(whoami)"
+change_user=false
+
+if [ -n "$transferuser" ] && [ "$transferuser" != "$scriptuser" ]; then
+	log "Rclone will run as user \"$transferuser\" instead of \"$scriptuser\"."
+	change_user=true
+fi
 
 # Run rclone, preserve its output for logging, and translate destination-space failures into exit code 28.
 run_rclone_move() {
 	local output=""
 	local status=0
 
+	# if output=$(/usr/bin/sudo -u $transferuser /usr/bin/rclone move "$@" 2>&1); then
 	if output=$(/usr/bin/rclone move "$@" 2>&1); then
 		[ ! -z "$output" ] && log "$output"
 		return 0
@@ -210,7 +232,7 @@ run_rclone_move() {
 
 	if [[ "$output" =~ [Nn]o[[:space:]]space[[:space:]]left[[:space:]]on[[:space:]]device|[Dd]isk[[:space:]]quota[[:space:]]exceeded|[Ii]nsufficient[[:space:]]space|[Nn]ot[[:space:]]enough[[:space:]]space ]]; then
 		ran_out_of_space=true
-		log "Destination ran out of space."
+		log "Destination ran out of space while moving \"$current_file_src_path\" to \"$current_dest_dir\"."
 		return 28
 	fi
 
@@ -246,16 +268,38 @@ finalize_and_exit() {
 		if [[ -n "$current_file_src_path" || -n "$current_dest_dir" ]]; then
 			log "Moving \"$current_file_src_path\" to \"$current_dest_dir\""
 		fi
+		if [[ -n "$current_dest_dir" ]]; then
+			log "WARNING There may be a leftover partial transfer in \"$current_dest_dir\"."
+		fi
 	fi
 
 	if [[ "$finish_actions_attempted" != true ]]; then
 		finish_actions_attempted=true
+
+		if [ "$transferflag" = true ]; then
+			log "Deleting empty directories in \"$src\"."
+			# Visit child directories before parents so newly emptied parents can be removed too.
+			while IFS= read -r dir; do
+				# Treat any remaining entry, including hidden files, as making the directory non-empty.
+				if [[ -z "$(find "$dir" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+					rmdir "$dir" || log "Error deleting empty directory \"$dir\"."
+				fi
+			# Feed the loop a depth-first list of subdirectories under src.
+			done < <(find "${src}" -depth -mindepth 1 -type d)
+			log 'Done.'
+		fi
+
+		if [ "$change_user" = true ]; then
+			log "Switching to user \"$scriptuser\" for shutdown actions."
+			su "$scriptuser"
+		fi
 
 		if [[ -n "$postcmd" && "$dryrun" = false && "$transferflag" = true ]]; then
 			if [[ "$termination_requested" = true && "$run_postcmd_on_termination" != true ]]; then
 				log "Skipping postcmd after ${termination_signal}."
 			else
 				log "Running postcmd: \"$postcmd\""
+
 				if output=$(bash -c "$postcmd" 2>&1); then
 					[ ! -z "$output" ] && log "Postcmd output: \"$output\""
 				else
@@ -429,13 +473,13 @@ do
 	FILELIST=$(trap "" SIGPIPE; find "${src}" \( ${exclude} \) -prune -o -type f -printf '%T@ %P\n' | sort)
 	[[ "$debug" = true ]] && log "Sample of FILELIST"
 	[[ "$debug" = true ]] && log "$(printf "%s\n" "$FILELIST" | head -n 3)"
-	
+
 
 	if [[ -z "$FILELIST" ]]; then
 		log "No files found to move"
 		break
 	fi
-	
+
 	declare -a fileArray
 	fileArray=()
 	
@@ -452,12 +496,23 @@ do
 		log "Found ${#fileArray[@]} eligible files."
 	fi
 
-	# run precmd if it has not been run and it is set
-	if [[ "$ran_precmd" = false && -n "$precmd" && "$dryrun" = false ]]; then
-		log "Running precmd \"$precmd\""
-		output=$(bash -c "$precmd" 2>&1)
-		[ ! -z "$output" ] && log "precmd output: $output"
-		ran_precmd=true
+	if [ "$ran_precmd" = false ]; then
+		# run precmd if it has not been run and it is set
+		if [ -n "$precmd" ]; then
+			if [ "$dryrun" = false ]; then
+				log "Running precmd \"$precmd\"."
+				ran_precmd=true
+				output=$(bash -c "$precmd" 2>&1)
+				[ ! -z "$output" ] && log "precmd output: $output"
+			else
+				log "Dry-run mode: skipping precmd \"$precmd\"."
+			fi
+		fi
+		if [ "$change_user" = true ]; then
+			log "Switching to user \"$transferuser\" for transfer actions."
+			ran_precmd=true
+			su "$transferuser"
+		fi
 	fi
 
 	# while disk usage is right and there are files left, move a batch of files
@@ -489,6 +544,8 @@ do
 		[[ -f $file_src_path ]] || { log "Not a file: \"$file_src_path\"."; exit 2; }
 		# Check that FILE is accessible
 		[[ -r $file_src_path ]] || { log "File \"$file_src_path\" is inaccessible."; exit 7; }
+		current_file_src_path="$file_src_path"
+		current_dest_dir="$dest_dir"
 		
 		if [ "$dryrun" = true ]
 		then
@@ -497,9 +554,15 @@ do
 			run_rclone_move "${file_src_path}" "${dest_dir}" --check-first --dry-run -v
 			stat=$?
 			[ $stat -ne 0 ] && { log "Failed to move file. Exit code $stat"; exit $stat; }
-
+			current_file_src_path=""
+			current_dest_dir=""
 			break
-		else		
+		else
+			# do real file transfer and do not exit loop
+			if [[ -n "$current_file_src_path" || -n "$current_dest_dir" ]]; then
+				log "Moving \"$current_file_src_path\" to \"$current_dest_dir\""
+			fi
+
 			#rsync -aSHAXWERm --delay-updates --preallocate --relative --remove-source-files "${src}/./${FILE}" "${dest}/" | log
 			run_rclone_move "${file_src_path}" "${dest_dir}" --check-first
 			stat=$?
@@ -511,6 +574,8 @@ do
 				exit $stat
 			fi
 			transferflag=true
+			current_file_src_path=""
+			current_dest_dir=""
 
 		fi
 
