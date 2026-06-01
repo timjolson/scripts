@@ -29,6 +29,6 @@ tar --exclude="${exclude}" -cp "${src}" -f "${dest}"
 
 [ -n "$postcmd" ] && { log "Running postcmd \"$postcmd\""; ${postcmd} 2>&1 | log; }
 
-log "Done."
+log "Done archiving `${src}` to `${dest}`."
 
 exit 0
