@@ -25,10 +25,14 @@ parse_args DEFAULTS "$@"
 [ -n "$precmd" ] && { log "Running precmd \"$precmd\""; ${precmd}; }
 
 log "Archiving ${src} to ${dest}"
-tar --exclude="${exclude}" -cp "${src}" -f "${dest}"
+if [[ -n "${exclude}" ]]; then
+    tar -S --exclude="${exclude}" -cpf "${dest}" "${src}"
+else
+    tar -S -cpf "${dest}" "${src}"
+fi
 
 [ -n "$postcmd" ] && { log "Running postcmd \"$postcmd\""; ${postcmd} 2>&1 | log; }
 
-log "Done archiving `${src}` to `${dest}`."
+log "Done archiving ${src} to ${dest}."
 
 exit 0
