@@ -144,7 +144,9 @@ case "$CMD" in
 
     "create-container")
         shift
-        pmc -f "$1" up --no-start
+        file="$1"
+        shift
+        pmc "$@" -f "$file" up --no-start 
         ;;
 
     "compose")
