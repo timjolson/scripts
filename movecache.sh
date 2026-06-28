@@ -19,7 +19,9 @@
 #	`dryrun` boolean to indicate whether to do a dry run (true) or real run (false)
 #	`batch` integer number of files to move per batch (10) larger batches are more efficient for large number of files
 #	`debug` boolean to indicate whether to log debug information (true) or not (false)
-#	`min-dest-space` minimum free space required on destination to proceed with transfer.
+#	`min_file_size` minimum file size to move (default 0 = all files) Bare numbers are interpreted as bytes. Suffixes `B`, `K`, `KiB`, `M`, `MiB`, `G`, `GiB` are also accepted.
+#   `max_file_size` maximum file size to move (default 0 = no limit) Bare numbers are interpreted as bytes. Suffixes `B`, `K`, `KiB`, `M`, `MiB`, `G`, `GiB` are also accepted.
+#	`min_dest_space` minimum free space required on destination to proceed with transfer.
 #		Bare numbers are interpreted as bytes. Suffixes `B`, `KB`, `MB`, `GB`, and percentages
 #		like `15%` are also accepted. (default `0` = 0 bytes)
 #   `transferuser` user to run rclone move command as, if different from the script runner (default is the script runner's user)
@@ -69,10 +71,12 @@ declare -A DEFAULTS=(
     ["batch"]=10
     ["debug"]=false
 	["min_dest_space"]="0"  # Default to 0 bytes if not provided
+	["min_file_size"]="0"  # Default to 0 bytes if not provided
+	["max_file_size"]="1000GB"  # Default to 1000 gigabytes ~= no limit
 	["transferuser"]=""
 )
 
-[ $# -ge 4 ] || { log "Usage $0 [--src <src>] [--dest <dest>] [--trigger <trigger percent>] [--target <target percent>] [--min-dest-space <min free space in B (bytes), KB, MB, GB, or %>] [--exclude <path_to_exclude_from_tar>] [--precmd <pre-transfer command>] [--postcmd <post-transfer command>] [--batch <integer size of batch>]"; exit 2; }
+[ $# -ge 4 ] || { log "Usage $0 [--src <src>] [--dest <dest>] [--trigger <trigger percent>] [--target <target percent>] [--min_file_size <min file size in B (bytes), K|M|G|KiB|MiB|GiB>] [--max_file_size <max file size in B (bytes), K|M|G|KiB|MiB|GiB>] [--min_dest_space <min free space in B (bytes), KB, MB, GB, or %>] [--exclude <path_to_exclude>] [--precmd <pre-transfer command>] [--postcmd <post-transfer command>] [--batch <integer size of batch>]"; exit 2; }
 parse_args DEFAULTS "$@"
 
 [ -z "${src}" ] && { log "Must provide a src directory"; exit 2;}
@@ -440,7 +444,7 @@ do
 		then
 			log "Dry-running moving \"$file_src_path\" to \"$dest_dir\""
 			#rsync -naSHAXWERm --delay-updates --preallocate --relative --remove-source-files "${src}/./${FILE}" "${dest}/" | log
-			run_rclone_move "${file_src_path}" "${dest_dir}" --check-first --dry-run -v
+			run_rclone_move "${file_src_path}" "${dest_dir}" --check-first --dry-run -v --min-size "${min_file_size}" --max-size "${max_file_size}" --metadata
 			stat=$?
 			[ $stat -ne 0 ] && { log "Failed to move file. Exit code $stat"; exit $stat; }
 			current_file_src_path=""
@@ -453,7 +457,7 @@ do
 			fi
 			
 			#rsync -aSHAXWERm --delay-updates --preallocate --relative --remove-source-files "${src}/./${FILE}" "${dest}/" | log
-			run_rclone_move "${file_src_path}" "${dest_dir}" --check-first
+			run_rclone_move "${file_src_path}" "${dest_dir}" --check-first --min-size "${min_file_size}" --max-size "${max_file_size}" --metadata
 			stat=$?
 			if [ $stat -ne 0 ]; then
 				if [ "$ran_out_of_space" = true ]; then
