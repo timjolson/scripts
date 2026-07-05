@@ -1,613 +1,529 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# rclone_auto_move.sh - Move files from src to dest using rclone when src usage is high.
+#
+# Single-run wrapper that executes exactly one `rclone move` per invocation when
+# the `--src` usage exceeds `--trigger`. The script computes a transfer cap
+# (based on destination free space, `--min-dest-space`, `--target`, and an
+# optional user `--max-transfer`) and runs a single `rclone move` capped to that
+# size. It preserves user-supplied rclone arguments and
+# does not auto-inject rclone `--stats` or `--use-json-log` flags.
+#
+# Features:
+#  - Single `rclone move` per execution (no internal batching).
+#  - Supports `--trigger` / `--target` percentages.
+#  - Supports `--min-dest-space`, `--max-transfer`, `--precmd`, `--postcmd`,
+#    `--dry-run`, and `--debug`.
+#  - Treats rclone exit codes 8 (`--max-transfer`) and 10 (`--max-duration`) as
+#    partial success if transfer activity was observed.
+#  - Prevents accidental same-FS local moves.
+#
+# Debugging:
+#  - When `--debug` is supplied the script will save the raw rclone capture to
+#    `/tmp/rclone_auto_move_rclone_output_<ts>.log` for inspection.
+#  - For deterministic parsing of per-file events you can pass rclone
+#    `--use-json-log --log-file /tmp/file` as rclone args (the script will not
+#    auto-add these flags by default).
+#
+# Exit codes (summary):
+#  - 0  success
+#  - 2  invalid/missing args
+#  - 28 destination ran out of space
+#  - other: rclone exit codes are propagated except where remapped for
+#    partial-success semantics (8,10 when activity observed)
 
-# TODO: leverage rclone move's (and pass any other args):
-# --max-age, --max-duration, --max-transfer & --cutoff-mode HARD|SOFT|CAUTIOUS, --metadata, --exclude, --delete-empty-src-dirs
-# handle source:path destination:path syntax (:path means it is a remote, so skip free space check)
-# handle rclone not finding any files to move
-# --max-duration exit code 10
-# --no-traverse --files-from --files-from-raw to move specific files (age order) [ - to use stdin ]
-
-# Script to automate moving files from a `src` to `dest` based on usage % of `src` filesystem. Uses `rclone move` to
-#   transfer the files and structure, then deletes empty directories from `src` location. Commands `precmd` and `postcmd`
-#   are executed before and after the transfer, respectively, but only if a transfer is attempted. `rclone move` is called
-#   with additional provided options, with a couple overrides explained below. Files are moved in order of 
-#   oldest modification time first, until either the `src` usage % is below `target`, `dest` free space 
-#   is below `min_dest_space`, there are no more files to move, or rclone stops the transfer for any reason.
-#	with --check-first as its only option (unless dryrun is true, then `--dry-run -v` are added). Files are moved in order of 
-#    oldest modification time first, until either the `src` usage % is below `target`, there are no more files to move,
-#	or the destination runs out of space.
-# 
-#	Optional (TODO) is rsync as a move method, and further option (TODO) of setting specific rsync options.
-#	Default rsync options include as many attributes as available ( rsync -aSHAXWERm --delay-updates --preallocate --relative --remove-source-files )
-# 
-# Args
-#	`src` directory ( use basic syntax, absolute path, and end with '/' )
-#	`dest` directory ( use basic syntax, absolute path, and end with '/' )
-#	`trigger` percentage ( format is '90' = 90 percent )
-#	`target` percentage ( format is '90' = 90 percent )
-#   `exclude` pattern to exclude from the transfer
-#   `precmd` command to run before beginning transfer (does not execute when dryrun is true or no files are to be moved)
-#   `postcmd` command to run after finishing transfer (does not execute when dryrun is true or no files were moved)
-#	`dryrun|dry-run` boolean to indicate whether to do a dry run (true) or real run (false)
-#	`batch` integer number of files to move per batch (10) larger batches are more efficient for large number of files
-#	`debug` boolean to indicate whether to log debug information (true) or not (false)
-#	`min-dest-space` minimum free space required on destination to proceed with transfer.
-#		Bare numbers are interpreted as bytes. Suffixes `B`, `KB`, `MB`, `GB`, and percentages
-#		like `15%` are also accepted. (default `0` = 0 bytes)
-#   `transferuser` user to run rclone move command as, if different from the script runner (default is the script runner's user)
-#
-# If the `src` filesystem usage % is greater than `trigger`, moves the oldest file from `src` to `dest`, 
-#	maintaining the source directory structure. This repeats until either there are no files left to move
-#	in `src` or `src` usage % is lower than `target`. After all transfers are complete, uses `find`
-#	command to delete empty directories in the `src` folder.
-#
-# Shutdown behavior:
-# 	-On `SIGTERM`/`SIGHUP`, the script records the in-progress transfer context, runs cleanup,
-# 		and then runs `postcmd` before exiting with the signal-derived status.
-# 	-On `SIGINT`, the script performs the same cleanup but skips `postcmd`, treating it as an
-# 		interactive abort rather than a managed service stop.
-#
-# Destination space handling:
-# 	-The script checks destination free space before each batch of transfers and uses --max-transfer to
-#       limit the batch size to HALF of the available space up to the `min_dest_space`
-# 	-If `rclone` later fails because the destination fills up during a transfer, the script marks
-# 		that as an insufficient-space condition, stops further processing, runs finalization, and exits 28.
-#	-`min_dest_space` accepts decimal units (`B`, `KB`, `MB`, `GB`) or `%` of the destination filesystem size.
-#
-# Exit Codes:
-# 	0 - Success
-# 	2 - Missing or invalid arguments
-# 	28 - Insufficient destination space (pre-check or `rclone` write failure caused by destination exhaustion)
-# 	7 - File is inaccessible
-# 	127 - rclone (or rsync) command not found
-#
-# Logging
-# 	-As a service (such as through systemd), logging is handled by the unit file.
-# 	-Running the script directly, set `logtofile`=true. The log location is then built from the basename
-# 		of the script, and goes in /var/log/{SCRIPTNAME}.log
-
-set -o errexit
-set -e
 set -u
+set -o pipefail
+# Do NOT set -e so we can run cleanup and postcmd reliably.
 
-# Directory where this functions.sh resides
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+progname="$(basename "$0")"
 
-# Prefer the immediate caller in BASH_SOURCE (works whether sourced or executed)
-caller_path="${BASH_SOURCE[1]:-$0}"
-caller_base="$(basename "${caller_path}")"
-caller_name="${caller_base%.*}"
-
-
-# Default values
+# Defaults / options
 src=""
 dest=""
-exclude=""
-trigger="-98"         # transfer no matter what
-target="-99"          # transfer until empty
+# by default, do a transfer
+trigger="-50"
+# by default, transfer all available files
+target="-99"
+# by default, don't require any minimum space on dest
+min_dest_space="0"
 precmd=""
 postcmd=""
 dryrun=false
+rclone_extra_args=()
+user_max_transfer=""
 debug=false
-min_dest_space="0"    # 0 bytes
-logto="/dev/null"
-batch=10
-transferuser=""
-logtofile=false
 
-
-log() {
-        local message=""
-        # Check if there is piped input
-        # Read from stdin, default to empty if read fails
-        [ -p /dev/stdin ] && read -r message || message=""  
-        # If no piped input, check for the first argument
-        [[ -z "$message" && $# -gt 0 ]] && message="$@"
-
-        # If still no message
-        if [[ -z "$message" ]]; then
-                [[ "$debug" = true ]] && echo "Log message is blank. Called from line ${BASH_LINENO[0]}."
-                return 0
-        fi
-
-        # log to journal
-        echo "$message"
-        # log to file with timestamp
-        [[ "$logtofile" = true ]] && { echo "$(date) : $message" >> "$logto"; }
-        return 0
-}
-
-
-
-Usage() {
-	log "Usage $0 [--dry-run <true|false>] [--src <src>] [--dest <dest>] [--trigger <trigger percent>] [--target <target percent>] \
-[--min-dest-space <min free space in B (bytes), KB, MB, GB, or %>] [--exclude <patttern(s) not to transfer>] \
-[--precmd <pre-transfer command>] [--postcmd <post-transfer command>] [--batch <integer size of batch>] [--debug <true|false>] \
-[--logto <log file path>]"
-	exit 2;
-}
-
-
-parse_args() {
-        while [[ "$#" -gt 0 ]]; do
-                case $1 in
-						--dry-run*|--dryrun*)
-								dryrun="$2"
-								shift
-								;;
-						--src*)
-								src="$2"
-								shift
-								;;
-						--dest*)
-								dest="$2"
-								shift
-								;;
-						--trigger*)
-								trigger="$2"
-								shift
-								;;
-						--target*)
-								target="$2"
-								shift
-								;;
-						--exclude*)
-								exclude="$2"
-								shift
-								;;
-						--precmd*)
-								precmd="$2"
-								shift
-								;;
-						--postcmd*)
-								postcmd="$2"
-								shift
-								;;
-						--min-dest-space*)
-								min_dest_space="$2"
-								shift
-								;;
-						--logto*)
-								logto="$2"
-								logtofile=true
-								shift
-								;;
-						--debug*)
-								debug="$2"
-								shift
-								;;
-                        *) 
-                                log "Invalid argument: $1"
-                                Usage
-                                ;;
-                esac
-                shift
-        done
-}
-
-
-[ -z "${src}" ] && { log "Must provide a `src` directory"; exit 2;}
-[ -z "${dest}" ] && { log "Must provide a `dest` directory"; exit 2;}
-[ ! -d "${src}" ] && { log "Directory \"$src\" does not exist"; exit 2;}
-[ ! -d "${dest}" ] && { log "Directory \"$dest\" does not exist"; exit 2;}
-
-# Make sure relevant commands are available
-command -v /usr/bin/rclone >/dev/null 2>&1 || { log "Error: rclone command not found."; exit 127; }
-# TODO: mv option
-# TODO: rsync option instead of rclone
-# command -v /usr/bin/rsync >/dev/null 2>&1 || { log "Error: rsync command not found."; exit 127; }
-
-transferflag=false
 ran_precmd=false
+transfer_performed=false
 ran_out_of_space=false
 termination_requested=false
 termination_signal=""
 termination_exit_code=0
 run_postcmd_on_termination=true
-finalizing=false
-current_file_src_path=""
-current_dest_dir=""
-finish_actions_attempted=false
-scriptuser="$(whoami)"
-change_user=false
 
-if [ -n "$transferuser" ] && [ "$transferuser" != "$scriptuser" ]; then
-	log "Rclone will run as user \"$transferuser\" instead of \"$scriptuser\"."
-	change_user=true
-fi
-
-# Run rclone, preserve its output for logging, and translate destination-space failures into exit code 28.
-run_rclone_move() {
-	local output=""
-	local status=0
-
-	# if output=$(/usr/bin/sudo -u $transferuser /usr/bin/rclone move "$@" 2>&1); then
-	if output=$(/usr/bin/rclone move "$@" 2>&1); then
-		[ ! -z "$output" ] && log "$output"
-		return 0
-	fi
-
-	status=$?
-	[ ! -z "$output" ] && log "$output"
-
-	if [[ "$output" =~ [Nn]o[[:space:]]space[[:space:]]left[[:space:]]on[[:space:]]device|[Dd]isk[[:space:]]quota[[:space:]]exceeded|[Ii]nsufficient[[:space:]]space|[Nn]ot[[:space:]]enough[[:space:]]space ]]; then
-		ran_out_of_space=true
-		log "Destination ran out of space while moving \"$current_file_src_path\" to \"$current_dest_dir\"."
-		return 28
-	fi
-
-	return "$status"
-}
-
-# Centralize shutdown work so normal exits and trapped signals share the same finishing path.
-finalize_and_exit() {
-	local exit_code=${1:-0}
-	local output=""
-	local postcmd_status=0
-
-	if [[ "$finalizing" = true ]]; then
-		exit "$exit_code"
-	fi
-
-	finalizing=true
-	trap - EXIT SIGINT SIGTERM SIGHUP
-	set +e
-
-	if [[ "$termination_requested" = true ]]; then
-		case "$termination_signal" in
-			SIGINT)
-				log "Received SIGINT; beginning interactive shutdown."
-				;;
-			SIGTERM)
-				log "Received SIGTERM; beginning managed shutdown."
-				;;
-			*)
-				log "Received ${termination_signal}; beginning shutdown."
-				;;
-		esac
-		if [[ -n "$current_file_src_path" || -n "$current_dest_dir" ]]; then
-			log "Moving \"$current_file_src_path\" to \"$current_dest_dir\""
-		fi
-		if [[ -n "$current_dest_dir" ]]; then
-			log "WARNING There may be a leftover partial transfer in \"$current_dest_dir\"."
-		fi
-	fi
-
-	if [[ "$finish_actions_attempted" != true ]]; then
-		finish_actions_attempted=true
-
-		if [ "$transferflag" = true ]; then
-			log "Deleting empty directories in \"$src\"."
-			# Visit child directories before parents so newly emptied parents can be removed too.
-			while IFS= read -r dir; do
-				# Treat any remaining entry, including hidden files, as making the directory non-empty.
-				if [[ -z "$(find "$dir" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
-					rmdir "$dir" || log "Error deleting empty directory \"$dir\"."
-				fi
-			# Feed the loop a depth-first list of subdirectories under src.
-			done < <(find "${src}" -depth -mindepth 1 -type d)
-			log 'Done.'
-		fi
-
-		if [ "$change_user" = true ]; then
-			log "Switching to user \"$scriptuser\" for shutdown actions."
-			su "$scriptuser"
-		fi
-
-		if [[ -n "$postcmd" && "$dryrun" = false && "$transferflag" = true ]]; then
-			if [[ "$termination_requested" = true && "$run_postcmd_on_termination" != true ]]; then
-				log "Skipping postcmd after ${termination_signal}."
-			else
-				log "Running postcmd: \"$postcmd\""
-
-				if output=$(bash -c "$postcmd" 2>&1); then
-					[ ! -z "$output" ] && log "Postcmd output: \"$output\""
-				else
-					postcmd_status=$?
-					[ ! -z "$output" ] && log "Postcmd output: \"$output\""
-					log "Postcmd failed with exit code $postcmd_status."
-				fi
-			fi
-		fi
-	fi
-
-	log "Source at \"$src\" using $(get_current_percentage "$src")%."
-
-	if [ "$ran_out_of_space" = true ]; then
-		log "Stopped processing due to insufficient space on destination ($dest)."
-		exit_code=28
-	fi
-
-	if [[ "$termination_requested" = true ]]; then
-		log "Exiting due to ${termination_signal} with code ${exit_code}."
-	else
-		log "Finished."
-	fi
-
-	exit "$exit_code"
-}
-
-# Record which signal was received and choose the matching shutdown policy.
-handle_signal() {
-	termination_requested=true
-	termination_signal="$1"
-	case "$1" in
-		SIGHUP)
-			termination_exit_code=129
-			run_postcmd_on_termination=true
-			;;
-		SIGINT)
-			termination_exit_code=130
-			run_postcmd_on_termination=false
-			;;
-		SIGTERM)
-			termination_exit_code=143
-			run_postcmd_on_termination=true
-			;;
-		*)
-			termination_exit_code=128
-			run_postcmd_on_termination=true
-			;;
-	esac
-}
-
-trap 'handle_signal SIGHUP; exit $termination_exit_code' SIGHUP
-trap 'handle_signal SIGINT; exit $termination_exit_code' SIGINT
-trap 'handle_signal SIGTERM; exit $termination_exit_code' SIGTERM
-trap 'exit_code=$?; [[ "$termination_requested" = true ]] && exit_code=$termination_exit_code; finalize_and_exit "$exit_code"' EXIT
-
-function get_current_percentage(){
-	df -B1 --output=size,avail "$1" | tail -n 1 | awk '{ if ($1 > 0) printf "%d", (($1 - $2) * 100) / $1; else print 0 }'
-}
-current_usage=$(get_current_percentage "$src")
-
-# Function to get available space in bytes for a given directory
-function get_available_space() {
-	df -B1 --output=avail "$1" | tail -n 1 | awk '{print $1}'
-}
-
-# Function to get total space in bytes for a given directory
-function get_total_space() {
-	df -B1 --output=size "$1" | tail -n 1 | awk '{print $1}'
-}
-
-# Parse min_dest_space into bytes. Bare numbers are treated as bytes.
-function parse_min_dest_space_bytes() {
-	local raw_value="${1:-0}"
-	local total_space_bytes="$2"
-	local normalized_value
-	local upper_value
-
-	normalized_value=$(echo "$raw_value" | tr -d '[:space:]')
-	[[ -z "$normalized_value" ]] && normalized_value="0"
-	upper_value=$(echo "$normalized_value" | tr '[:lower:]' '[:upper:]')
-
-	if [[ "$upper_value" =~ ^([0-9]+([.][0-9]+)?)%$ ]]; then
-		awk -v total="$total_space_bytes" -v pct="${BASH_REMATCH[1]}" 'BEGIN { printf "%.0f", total * pct / 100 }'
-		return 0
-	fi
-
-	if [[ "$upper_value" =~ ^([0-9]+([.][0-9]+)?)(B|K|KB|M|MB|G|GB)?$ ]]; then
-		local numeric_part="${BASH_REMATCH[1]}"
-		local unit_part="${BASH_REMATCH[3]}"
-
-		case "$unit_part" in
-			""|B)
-				awk -v value="$numeric_part" 'BEGIN { printf "%.0f", value }'
-				;;
-			M|MB)
-				awk -v value="$numeric_part" 'BEGIN { printf "%.0f", value * 1000 * 1000 }'
-				;;
-			K|KB)
-				awk -v value="$numeric_part" 'BEGIN { printf "%.0f", value * 1000 }'
-				;;
-			G|GB)
-				awk -v value="$numeric_part" 'BEGIN { printf "%.0f", value * 1000 * 1000 * 1000 }'
-				;;
-			*)
-				log "Invalid min_dest_space unit: \"$raw_value\""
-				exit 2
-				;;
-		esac
-		return 0
-	fi
-
-	log "Invalid min_dest_space value: \"$raw_value\""
-	exit 2
-}
-current_dest_space=$(get_available_space "$dest")
-current_dest_space_mb="$((current_dest_space / 1000000))"
-current_dest_total_space=$(get_total_space "$dest")
-
-# keep the user-facing value in MB, but compare in bytes
-min_dest_space_input=${min_dest_space:-0}
-min_dest_space=$(parse_min_dest_space_bytes "$min_dest_space_input" "$current_dest_total_space")
-min_dest_space_mb="$((min_dest_space / 1000000))"
-
-log "Initial source usage: ${current_usage}%, destination free space: ${current_dest_space_mb} MB, minimum required: ${min_dest_space_mb} MB (from \"${min_dest_space_input}\")."
-
-
-# handle delta % instead of just trigger&target
-if [[ ${trigger} -eq "-98" ]]; then
-	# trigger was NOT provided
-	if [[ ${target} -ne -99 ]]; then
-		# target was provided
-		delta=$(( target * ((target<0) - (target>0)) ))
-		target=$(( current_usage + delta ))
-		log "Source at ${src} using ${current_usage}%. Drawing down by $delta% --> $target%."
-		trigger=${current_usage}
-	else
-		# target was NOT provided
-		# default values will move everything
-		log "No trigger or target provided, will move all available files."
-	fi
+# Use stdbuf if available to force line-buffered output for rclone and tee.
+if command -v stdbuf >/dev/null 2>&1; then
+    stdbuf_prefix=(stdbuf -oL -eL)
 else
-	# trigger WAS provided
-	if [[ ${target} -eq "-98" ]]; then
-		# target was NOT provided
-		log "No target provided, will move all available files if applicable."
-	else
-		# target WAS provided
-		log "Source at ${src} using ${current_usage}%. Goal is ${trigger}% --> ${target}%."
-	fi
+    stdbuf_prefix=()
 fi
 
+log() {
+    echo "$progname: $*"
+}
 
-if [ ${current_usage} -lt ${trigger} ]; then
-	log "Source at ${src} using ${current_usage}%, which is below the trigger of ${trigger}%. No files will be moved."
-	exit 0
+usage() {
+        cat <<'EOF'
+Usage: rclone_auto_move.sh --src <src> --dest <dest> [--trigger <percent>] [--target <percent>] [--min-dest-space <size|%>] [--precmd '<cmd>'] [--postcmd '<cmd>'] [--debug] [rclone args]
+
+Single-run wrapper: runs one `rclone move` when `--src` usage >= `--trigger`.
+
+Options:
+    --min-dest-space <size|%>   Minimum free space to keep on destination (size or percent).
+    --max-transfer <size>       Optional cap for this run (rclone SizePrefix supported, e.g. 2G).
+    --precmd '<cmd>'            Command to run before the transfer (runs only if transfer will occur).
+    --postcmd '<cmd>'           Command to run after a successful transfer (runs only if transfer occurred).
+    --debug                     Save raw rclone capture to /tmp for debugging.
+    --dry-run                   Don't perform transfers (passed to rclone; precmd/postcmd skipped).
+    --help                      Show this help and exit.
+
+    Any non-script arguments are passed directly to `rclone move` (the script
+    will always add `--max-transfer` based on internal caps but otherwise preserves
+    user flags; the script does not add `--stats` or `--use-json-log` automatically).
+
+Examples:
+    rclone_auto_move.sh --src /mnt/src --dest /mnt/dest --trigger 90 --target 85 --min-dest-space 5G --metadata -v
+    rclone_auto_move.sh --src /mnt/src --dest remote:bucket/path --trigger 90 --target 80 --max-transfer 2G --debug --use-json-log --log-file /tmp/rclone.json
+
+Notes:
+    - The script detects transfers by parsing rclone JSON logs or human-readable
+        INFO/NOTICE lines. For deterministic JSON detection pass
+        `--use-json-log --log-file <path>` in the rclone args (recommended when
+        debugging).
+    - SIGINT (interactive Ctrl-C) will skip `--postcmd`; SIGTERM/SIGHUP will run it.
+    - Exit code 28 indicates destination ran out of space.
+EOF
+    exit 2
+}
+
+# Parse args
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --src) src="$2"; shift 2;;
+        --dest) dest="$2"; shift 2;;
+        --trigger) trigger="$2"; shift 2;;
+        --target) target="$2"; shift 2;;
+        --min-dest-space) min_dest_space="$2"; shift 2;;
+        --max-transfer) user_max_transfer="$2"; shift 2;;
+        --debug) debug=true; shift;;
+        --precmd) precmd="$2"; shift 2;;
+        --postcmd) postcmd="$2"; shift 2;;
+        --dry-run|--dryrun) dryrun=true; shift;;
+        --help) usage;;
+        *) rclone_extra_args+=("$1"); shift;;
+    esac
+done
+
+
+[ -z "$src" ] && { log "Missing --src"; usage; }
+[ -z "$dest" ] && { log "Missing --dest"; usage; }
+
+is_remote() {
+    local p="$1"
+    [[ "$p" == *:* && "${p:0:1}" != "/" ]]
+}
+
+validate_path() {
+    local p="$1"
+    if is_remote "$p"; then
+        if ! rclone lsd "$p" --max-depth 1 >/dev/null 2>&1; then
+            log "Remote path unreachable: $p"
+            return 2
+        fi
+    else
+        if [ ! -d "$p" ]; then
+            log "Local path does not exist: $p"
+            return 2
+        fi
+    fi
+    return 0
+}
+
+if ! validate_path "$src"; then exit 2; fi
+if ! validate_path "$dest"; then exit 2; fi
+
+# Verify src and dest are not on same filesystem when both local
+if ! is_remote "$src" && ! is_remote "$dest"; then
+    src_dev=$(stat -c %d "$src" 2>/dev/null || echo "")
+    dest_dev=$(stat -c %d "$dest" 2>/dev/null || echo "")
+    if [[ -n "$src_dev" && -n "$dest_dev" && "$src_dev" == "$dest_dev" ]]; then
+        log "Source and destination are on the same filesystem; refusing to run."
+        exit 2
+    fi
 fi
 
-while [ ${current_usage} -gt ${target} ]
-do
-	if [[ ${current_dest_space} -lt ${min_dest_space} ]]; then
-		log "Insufficient space on destination ($dest) during batch processing. Required: ${min_dest_space_mb} MB, Available: ${current_dest_space_mb} MB."
-		ran_out_of_space=true
-		break
-	fi
+get_dest_space_bytes() {
+    local target="$1"
+    if is_remote "$target"; then
+        local about
+        about=$(rclone about "$target" --json 2>/dev/null) || { echo "0 0"; return 0; }
+        local compact
+        compact=$(echo "$about" | tr -d '[:space:]')
+        local free total
+        free=$(echo "$compact" | sed -n 's/.*"free":\([0-9]\+\).*/\1/p')
+        total=$(echo "$compact" | sed -n 's/.*"total":\([0-9]\+\).*/\1/p')
+        [ -z "$free" ] && free=0
+        [ -z "$total" ] && total=0
+        printf "%s %s" "$free" "$total"
+    else
+        local avail size
+        read size avail < <(df -B1 --output=size,avail "$target" | tail -n1)
+        size="${size:-0}"
+        avail="${avail:-0}"
+        printf "%s %s" "$avail" "$size"
+    fi
+}
 
-	log "Disk percentage ${current_usage}% >= $target%. Destination free space ${current_dest_space_mb} MB >= ${min_dest_space_mb} MB."
+get_src_usage_percent() {
+    local s="$1"
+    if is_remote "$s"; then
+        local about compact free total
+        about=$(rclone about "$s" --json 2>/dev/null) || { echo 0; return; }
+        compact=$(echo "$about" | tr -d '[:space:]')
+        free=$(echo "$compact" | sed -n 's/.*"free":\([0-9]\+\).*/\1/p')
+        total=$(echo "$compact" | sed -n 's/.*"total":\([0-9]\+\).*/\1/p')
+        [ -z "$free" ] && free=0
+        [ -z "$total" ] && total=0
+        if [ "$total" -gt 0 ]; then
+            awk -v t="$total" -v f="$free" 'BEGIN{printf("%d", ((t-f)*100)/t)}'
+        else
+            echo 0
+        fi
+    else
+        df -B1 --output=size,avail "$s" | tail -n1 | awk '{ if ($1>0) printf "%d", (($1-$2)*100)/$1; else print 0 }'
+    fi
+}
 
-	[[ "$debug" = true ]] && log "find command is:"
-	[[ "$debug" = true ]] && log "find \"${src}\" \( ${exclude} \) -prune -o -type f -printf '%T@ %P\n' | sort"
-	FILELIST=$(trap "" SIGPIPE; find "${src}" \( ${exclude} \) -prune -o -type f -printf '%T@ %P\n' | sort)
-	[[ "$debug" = true ]] && log "Sample of FILELIST"
-	[[ "$debug" = true ]] && log "$(printf "%s\n" "$FILELIST" | head -n 3)"
+parse_size_to_bytes() {
+    local raw="$1"
+    local total_bytes="${2:-0}"
+    local up low
+
+    # Normalize and strip spaces
+    up=$(echo "$raw" | tr -d '[:space:]')
+    low=$(echo "$up" | tr '[:upper:]' '[:lower:]')
+
+    # Percent form (e.g. 10%)
+    if [[ "$low" =~ ^([0-9]+(\.[0-9]+)?)%$ ]]; then
+        local pct="${BASH_REMATCH[1]}"
+        awk -v total="$total_bytes" -v p="$pct" 'BEGIN{printf("%.0f", total * p / 100)}'
+        return 0
+    fi
+
+    # Accept common SI/IEC suffixes in a case-insensitive way
+    if [[ "$low" =~ ^([0-9]+(\.[0-9]+)?)(b|k|kb|ki|kib|m|mb|mi|mib|g|gb|gi|gib|t|tb|ti|tib|p|pb|pi|pib|e|eb|ei|eib)?$ ]]; then
+        local num="${BASH_REMATCH[1]}"
+        local unit="${BASH_REMATCH[3]}"
+        case "$unit" in
+            ""|b) awk -v v="$num" 'BEGIN{printf("%.0f", v)}' ;;
+            k|kb) awk -v v="$num" 'BEGIN{printf("%.0f", v * 1000)}' ;;
+            ki|kib) awk -v v="$num" 'BEGIN{printf("%.0f", v * 1024)}' ;;
+            m|mb) awk -v v="$num" 'BEGIN{printf("%.0f", v * 1000 * 1000)}' ;;
+            mi|mib) awk -v v="$num" 'BEGIN{printf("%.0f", v * 1024 * 1024)}' ;;
+            g|gb) awk -v v="$num" 'BEGIN{printf("%.0f", v * 1000 * 1000 * 1000)}' ;;
+            gi|gib) awk -v v="$num" 'BEGIN{printf("%.0f", v * 1024 * 1024 * 1024)}' ;;
+            t|tb) awk -v v="$num" 'BEGIN{printf("%.0f", v * 1000 * 1000 * 1000 * 1000)}' ;;
+            ti|tib) awk -v v="$num" 'BEGIN{printf("%.0f", v * 1024 * 1024 * 1024 * 1024)}' ;;
+            p|pb) awk -v v="$num" 'BEGIN{printf("%.0f", v * 1000 * 1000 * 1000 * 1000 * 1000)}' ;;
+            pi|pib) awk -v v="$num" 'BEGIN{printf("%.0f", v * 1024 * 1024 * 1024 * 1024 * 1024)}' ;;
+            e|eb) awk -v v="$num" 'BEGIN{printf("%.0f", v * 1000 * 1000 * 1000 * 1000 * 1000 * 1000)}' ;;
+            ei|eib) awk -v v="$num" 'BEGIN{printf("%.0f", v * 1024 * 1024 * 1024 * 1024 * 1024 * 1024)}' ;;
+            *) log "Unsupported unit in size: $raw"; return 2;;
+        esac
+        return 0
+    fi
+
+    log "Invalid size format: $raw"
+    return 2
+
+}
+
+bytes_to_rclone_size() {
+    local b="$1"
+    # Use SI units to match rclone's SizePrefix (K=1000, M=1000^2, ...)
+    if [ "$b" -lt 1000 ]; then printf "%dB" "$b"; return; fi
+    local val=$(( b / 1000 ))
+    if [ $val -lt 1000 ]; then printf "%dK" "$val"; return; fi
+    val=$(( val / 1000 )); if [ $val -lt 1000 ]; then printf "%dM" "$val"; return; fi
+    val=$(( val / 1000 )); if [ $val -lt 1000 ]; then printf "%dG" "$val"; return; fi
+    val=$(( val / 1000 )); printf "%dT" "$val"
+}
+
+detect_transfer_activity() {
+    # $1 = path to rclone captured output
+    local out="$1"
+    # If rclone emitted JSON logs with stats, detect totalTransfers > 0
+    if grep -qE '"totalTransfers"\s*:\s*[0-9]+' "$out" >/dev/null 2>&1; then
+        return 0
+    fi
+    # JSON object entries for per-file events usually include an "object" field
+    if grep -qE '"object"\s*:' "$out" >/dev/null 2>&1; then
+        return 0
+    fi
+    # Human-readable summary / per-file messages (several rclone formats)
+    # Match the "Word:" forms (e.g. "Copied:")
+    if grep -E 'Transferred:|Renamed:|Copied:|Moved:|Deleted:' "$out" >/dev/null 2>&1; then
+        return 0
+    fi
+    # Match action words that appear after a path and separator, e.g. ": Copied (new)" or ": Deleted"
+    if grep -Ei ':\s*(Copied|Moved|Renamed|Deleted|Removed|Transferred|Created|Updated)\b' "$out" >/dev/null 2>&1; then
+        return 0
+    fi
+    # Match log-level prefixed lines like "NOTICE: ... Copied" or "INFO  : ...: Copied"
+    if grep -Ei '(NOTICE|INFO)\s*[: ]+.*\b(Copied|Moved|Renamed|Deleted|Removed|Transferred|Created|Updated)\b' "$out" >/dev/null 2>&1; then
+        return 0
+    fi
+    return 1
+}
+
+finalize_and_exit() {
+    local exit_code=${1:-0}
+    local post_status=0
+
+    # Save tmp capture only in debug mode, then always clean up the temp file.
+    if [ -n "${tmp_output:-}" ] && [ -f "$tmp_output" ]; then
+        if [ "$debug" = true ]; then
+            outsave="/tmp/rclone_auto_move_rclone_output_$(date +%s).log"
+            cp -f "$tmp_output" "$outsave" 2>/dev/null || true
+            log "Saved raw rclone output to $outsave"
+        fi
+        rm -f "$tmp_output" || true
+    fi
+
+    # Run postcmd only when a transfer actually occurred, postcmd is set,
+    # not in dry-run, and termination policy allows it.
+    if $transfer_performed && [ -n "$postcmd" ] && [ "$dryrun" = false ]; then
+        if [[ "$termination_requested" = true && "$run_postcmd_on_termination" != true ]]; then
+            log "Skipping postcmd after ${termination_signal}."
+        else
+            log "Running postcmd: $postcmd"
+            if output=$(bash -c "$postcmd" 2>&1); then
+                log "postcmd output: $output"
+            else
+                post_status=$?
+                log "postcmd failed with exit code $post_status"
+            fi
+        fi
+    fi
+
+    if [[ "$ran_out_of_space" = true ]]; then
+        log "Stopped processing due to insufficient destination space."
+        exit_code=28
+    fi
+
+    if [[ "$termination_requested" = true ]]; then
+        log "Exiting due to ${termination_signal} with code ${exit_code}."
+    else
+        log "Finished with code ${exit_code}."
+    fi
+
+    exit $exit_code
+}
+
+handle_signal() {
+    termination_requested=true
+    termination_signal="$1"
+    case "$1" in
+        SIGHUP) termination_exit_code=129; run_postcmd_on_termination=true;;
+        SIGINT) termination_exit_code=130; run_postcmd_on_termination=false;;
+        SIGTERM) termination_exit_code=143; run_postcmd_on_termination=true;;
+        *) termination_exit_code=128; run_postcmd_on_termination=true;;
+    esac
+    exit $termination_exit_code
+}
+
+trap 'handle_signal SIGHUP' SIGHUP
+trap 'handle_signal SIGINT' SIGINT
+trap 'handle_signal SIGTERM' SIGTERM
+trap 'finalize_and_exit $?' EXIT
+
+log "Initial source: $src, destination: $dest, trigger: ${trigger}%, target: ${target}%, min-dest-space: $min_dest_space, dry-run: $dryrun"
+
+if ! [[ "$trigger" =~ ^-?[0-9]+$ ]] || ! [[ "$target" =~ ^-?[0-9]+$ ]]; then
+    log "Trigger and target must be integer percentages."
+    exit 2
+fi
+
+current_usage=$(get_src_usage_percent "$src")
+log "Initial source usage: ${current_usage}%." 
+
+if [ "$current_usage" -lt "$trigger" ]; then
+    log "Source usage ${current_usage}% is below trigger ${trigger}%. No transfer needed."
+    exit 0
+fi
+
+# Single-run transfer (no batching)
+read dest_avail dest_total < <(get_dest_space_bytes "$dest")
+dest_avail=${dest_avail:-0}
+dest_total=${dest_total:-0}
+
+if ! min_dest_bytes=$(parse_size_to_bytes "$min_dest_space" "$dest_total"); then
+    log "Failed parsing --min-dest-space value: $min_dest_space"
+    exit 2
+fi
+
+transferrable=$(( dest_avail - min_dest_bytes ))
+if [ "$transferrable" -le 0 ]; then
+    log "Insufficient destination space: available $dest_avail bytes, required minimum $min_dest_bytes bytes."
+    ran_out_of_space=true
+else
+    # Determine source total/used bytes
+    if is_remote "$src"; then
+        about=$(rclone about "$src" --json 2>/dev/null) || { src_total=0; src_free=0; }
+        compact=$(echo "$about" | tr -d '[:space:]')
+        src_free=$(echo "$compact" | sed -n 's/.*"free":\([0-9]\+\).*/\1/p')
+        src_total=$(echo "$compact" | sed -n 's/.*"total":\([0-9]\+\).*/\1/p')
+        src_free=${src_free:-0}
+        src_total=${src_total:-0}
+    else
+        read src_total src_free < <(df -B1 --output=size,avail "$src" | tail -n1)
+        src_total=${src_total:-0}
+        src_free=${src_free:-0}
+    fi
 
 
-	if [[ -z "$FILELIST" ]]; then
-		log "No files found to move"
-		break
-	fi
+    # Compute bytes needed to reduce source usage down to the target percentage
+    needed_bytes=0
+    if [ "$target" -ge 0 ] && [ "$current_usage" -gt "$target" ] && [ "$src_total" -gt 0 ]; then
+        needed_bytes=$(( (current_usage - target) * src_total / 100 ))
+    else
+        # If target is negative (unset), treat needed_bytes as unlimited for target purposes
+        needed_bytes=$transferrable
+    fi
 
-	declare -a fileArray
-	fileArray=()
-	
-	# Read each line into the array
-	while IFS= read -r line; do
-		fileArray+=("$line")
-	done <<< "$FILELIST"
-	[[ "$debug" = true ]] && log "fileArray sample \"${fileArray[@]:0:2}\""
-	
-	if [ ${#fileArray[@]} -eq 0 ]; then
-		log "No files available to move."
-		break
-	else
-		log "Found ${#fileArray[@]} eligible files."
-	fi
+    # Initial cap: destination transferrable space
+    cap=$transferrable
 
-	if [ "$ran_precmd" = false ]; then
-		# run precmd if it has not been run and it is set
-		if [ -n "$precmd" ]; then
-			if [ "$dryrun" = false ]; then
-				log "Running precmd \"$precmd\"."
-				ran_precmd=true
-				output=$(bash -c "$precmd" 2>&1)
-				[ ! -z "$output" ] && log "precmd output: $output"
-			else
-				log "Dry-run mode: skipping precmd \"$precmd\"."
-			fi
-		fi
-		if [ "$change_user" = true ]; then
-			log "Switching to user \"$transferuser\" for transfer actions."
-			ran_precmd=true
-			su "$transferuser"
-		fi
-	fi
+    # Cap by what is needed to reach the target
+    if [ "$needed_bytes" -gt 0 ] && [ "$needed_bytes" -lt "$cap" ]; then
+        cap=$needed_bytes
+    fi
 
-	# while disk usage is right and there are files left, move a batch of files
-	log "Starting batch move of up to $batch files."
-	count=0
-	while [[ ${current_usage} -ge ${target} && ${#fileArray[@]} -gt 0 && $count -lt $batch && $current_dest_space -ge $min_dest_space ]]
-	do
-		count=$((count + 1))
-		
-		FILE=$(echo "${fileArray[0]}" |  cut -d' ' -f2-)
-		[[ "$debug" = true ]] && log "FILE= $FILE"
-		
-		# Check that FILE is not empty
-		[[ -z $FILE ]] && { log "File string is empty: $FILE"; exit 1; }
-		[[ -n $FILE ]] || { log "File string contains nothing: $FILE"; exit 1; }
-		
-		file_sub_dir=${FILE%/*}
-		file_src_path=${src}/${FILE}
-		
-		if [[ "$file_sub_dir" == "$FILE" ]]; then
-			[[ "$debug" = true ]] && log "Standalone file \"$FILE\""
-			file_sub_dir=""
-			dest_dir=${dest}/
-		else
-			dest_dir=${dest}/${file_sub_dir}/
-		fi
-		
-		# Check that FILE is a file
-		[[ -f $file_src_path ]] || { log "Not a file: \"$file_src_path\"."; exit 2; }
-		# Check that FILE is accessible
-		[[ -r $file_src_path ]] || { log "File \"$file_src_path\" is inaccessible."; exit 7; }
-		current_file_src_path="$file_src_path"
-		current_dest_dir="$dest_dir"
-		
-		if [ "$dryrun" = true ]
-		then
-			log "Dry-running moving \"$file_src_path\" to \"$dest_dir\""
-			#rsync -naSHAXWERm --delay-updates --preallocate --relative --remove-source-files "${src}/./${FILE}" "${dest}/" | log
-			run_rclone_move "${file_src_path}" "${dest_dir}" --check-first --dry-run -v
-			stat=$?
-			[ $stat -ne 0 ] && { log "Failed to move file. Exit code $stat"; exit $stat; }
-			current_file_src_path=""
-			current_dest_dir=""
-			break
-		else
-			# do real file transfer and do not exit loop
-			if [[ -n "$current_file_src_path" || -n "$current_dest_dir" ]]; then
-				log "Moving \"$current_file_src_path\" to \"$current_dest_dir\""
-			fi
+    # Parse user-specified --max-transfer (if any) and cap by it
+    user_max_bytes=""
+    if [ -n "${user_max_transfer:-}" ]; then
+        user_max_bytes=$(parse_size_to_bytes "$user_max_transfer" "$dest_total") || user_max_bytes=""
+        if [ -n "$user_max_bytes" ]; then
+            if [ "$user_max_bytes" -lt "$cap" ]; then
+                cap="$user_max_bytes"
+            fi
+        else
+            log "Warning: unable to parse user --max-transfer: $user_max_transfer; ignoring cap."
+        fi
+    fi
 
-			#rsync -aSHAXWERm --delay-updates --preallocate --relative --remove-source-files "${src}/./${FILE}" "${dest}/" | log
-			run_rclone_move "${file_src_path}" "${dest_dir}" --check-first
-			stat=$?
-			if [ $stat -ne 0 ]; then
-				if [ "$ran_out_of_space" = true ]; then
-					break
-				fi
-				log "Failed to move file. Exit code $stat."
-				exit $stat
-			fi
-			transferflag=true
-			current_file_src_path=""
-			current_dest_dir=""
+    if [ "$cap" -le 0 ]; then
+        log "Calculated transfer cap is zero; nothing to transfer."
+    else
+        batch_bytes="$cap"
+        batch_size_str=$(bytes_to_rclone_size "$batch_bytes")
+        log "Transfer caps: dest_avail=$dest_avail min_dest=$min_dest_bytes transferrable=$transferrable needed_for_target=$needed_bytes user_max=${user_max_transfer:-unset} final_max_transfer=$batch_size_str"
 
-		fi
+        if [ "$ran_precmd" = false ] && [ -n "$precmd" ] && [ "$dryrun" = false ]; then
+            log "Running precmd: $precmd"
+            if output=$(bash -c "$precmd" 2>&1); then
+                log "precmd output: $output"
+            else
+                rc=$?
+                log "precmd failed with exit code $rc, aborting."
+                exit $rc
+            fi
+            ran_precmd=true
+        fi
 
-		current_dest_space=$(get_available_space "$dest")
+        # Build rclone argument list and include --dry-run in the args array
+        rclone_args=(--max-transfer "$batch_size_str")
+        if [ "$dryrun" = true ]; then
+            # Avoid duplicating --dry-run if user passed it in trailing rclone args
+            found=false
+            for _a in "${rclone_extra_args[@]}"; do
+                if [[ "$_a" == "--dry-run" ]]; then found=true; break; fi
+            done
+            if [ "$found" = false ]; then
+                rclone_args+=("--dry-run")
+            fi
+        fi
+        if [ "${#rclone_extra_args[@]}" -gt 0 ]; then
+            rclone_args+=("${rclone_extra_args[@]}")
+        fi
+        rclone_cmd=(rclone move "$src" "$dest" "${rclone_args[@]}")
 
-		if [ ${#fileArray[@]} -gt 0 ]; then 
-			fileArray=("${fileArray[@]:1}")
-			[[ "$debug" = true ]] && log "Going to next file."
-		else
-			[[ "$debug" = true ]] && log "Finished batch."
-			break
-		fi
+        log "Running: ${rclone_cmd[*]}"
+        tmp_output="$(mktemp)" || tmp_output="/tmp/${progname}.$$"
 
-	done # finish batch of file moves
+        if [ ${#stdbuf_prefix[@]} -gt 0 ]; then
+            "${stdbuf_prefix[@]}" "${rclone_cmd[@]}" 2>&1 | stdbuf -oL tee "$tmp_output"
+        else
+            "${rclone_cmd[@]}" 2>&1 | tee "$tmp_output"
+        fi
+        rc=${PIPESTATUS[0]}
 
+        # Detect transfer activity from captured output (supports JSON logs and human-readable)
+        if detect_transfer_activity "$tmp_output"; then
+            transfer_performed=true
+        fi
 
-	current_dest_space=$(get_available_space "$dest")
-	current_dest_space_mb="$((current_dest_space / 1000000))"
-	current_usage=$(get_current_percentage "$src")
+        if [ $rc -ne 0 ]; then
+            if grep -Ei "no[[:space:]]space|disk[[:space:]]quota|insufficient[[:space:]]space|not[[:space:]]enough[[:space:]]space" "$tmp_output" >/dev/null 2>&1; then
+                ran_out_of_space=true
+                log "Detected destination ran out of space during transfer."
+            fi
 
-	if [ "$ran_out_of_space" = true ]; then
-		break
-	fi
+            case $rc in
+                8)
+                    if [ "$transfer_performed" = true ]; then
+                        log "rclone reported --max-transfer reached (exit code 8) but transfer activity detected; treating as partial success."
+                        # continue
+                    else
+                        log "rclone ended with exit code 8 (max-transfer reached) and no transfers observed."
+                        exit $rc
+                    fi
+                    ;;
+                10)
+                    if [ "$transfer_performed" = true ]; then
+                        log "rclone reported --max-duration reached (exit code 10) but transfer activity detected; treating as partial success."
+                    else
+                        log "rclone ended with exit code 10 (max-duration reached) and no transfers observed."
+                        exit $rc
+                    fi
+                    ;;
+                9)
+                    log "rclone ended with exit code 9 (no files transferred with --error-on-no-transfer)."
+                    exit $rc
+                    ;;
+                *)
+                    log "rclone ended with exit code $rc."
+                    exit $rc
+                    ;;
+            esac
+        else
+            if [ "$transfer_performed" = true ]; then
+                log "Transfer finished successfully (rc=0)."
+            else
+                log "No transfer activity detected in rclone output; nothing moved."
+            fi
+        fi
 
-	if [ "$dryrun" = true ]; then
-		log "Broke batch loop after first file."
-		break
-	fi
+        current_usage=$(get_src_usage_percent "$src")
+        log "Updated source usage: ${current_usage}%." 
 
-done # finish all file move loops (usage % loop)
-
+        if [ "$dryrun" = true ]; then
+            log "Dry-run mode: completing after one simulated transfer."
+        fi
+    fi
+fi
 
 exit_code=0
 [ "$ran_out_of_space" = true ] && exit_code=28
-exit "$exit_code"
+
+finalize_and_exit $exit_code
