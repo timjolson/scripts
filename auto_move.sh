@@ -327,6 +327,7 @@ finalize_and_exit() {
         log "Finished with code ${exit_code}."
     fi
 
+    trap - EXIT SIGINT SIGHUP SIGTERM
     exit $exit_code
 }
 
