@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# rclone_auto_move.sh - Move files from src to dest using rclone when src usage is high.
+# auto_move.sh - Move files from src to dest using rclone when src usage is high.
 #
 # Single-run wrapper that executes exactly one `rclone move` per invocation when
 # the `--src` usage exceeds `--trigger`. The script computes a transfer cap
@@ -16,20 +16,6 @@
 #  - Treats rclone exit codes 8 (`--max-transfer`) and 10 (`--max-duration`) as
 #    partial success if transfer activity was observed.
 #  - Prevents accidental same-FS local moves.
-#
-# Debugging:
-#  - When `--debug` is supplied the script will save the raw rclone capture to
-#    `/tmp/rclone_auto_move_rclone_output_<ts>.log` for inspection.
-#  - For deterministic parsing of per-file events you can pass rclone
-#    `--use-json-log --log-file /tmp/file` as rclone args (the script will not
-#    auto-add these flags by default).
-#
-# Exit codes (summary):
-#  - 0  success
-#  - 2  invalid/missing args
-#  - 28 destination ran out of space
-#  - other: rclone exit codes are propagated except where remapped for
-#    partial-success semantics (8,10 when activity observed)
 
 set -u
 set -o pipefail
@@ -53,6 +39,67 @@ rclone_extra_args=()
 user_max_transfer=""
 debug=false
 
+usage() {
+cat <<'EOF'
+Usage: auto_move.sh --src <src> --dest <dest> [options] [rclone args...]
+
+Single-run wrapper: runs one `rclone move` when `--src` usage >= `--trigger`.
+The script computes a transfer cap from destination free space, `--min-dest-space`,
+the `--target` draw-down and an optional `--max-transfer`, then runs a single
+`rclone move` capped to that size. Other rclone args you provide are preserved.
+
+Required:
+    --src <path|remote:>        Source path or rclone remote:prefix
+    --dest <path|remote:>       Destination path or rclone remote:prefix
+
+Script options:
+    --trigger <percent>         Trigger percentage (integer). If source usage >= trigger, a transfer runs.
+                                Special: negative values (e.g. -50) are treated as "always trigger".
+                                Default: -50
+    --target <percent>          Target percentage to draw down to (integer). If negative, no target drawdown limit (= 0%).
+                                Default: -99
+    --min-dest-space <size|%>   Minimum free space to leave on destination. Accepts % or sizes.
+                                Supported suffixes: B, K, KB, KiB, M, MB, MiB, G, GB, GiB, T, Ti, P, E.
+                                Examples: 5G, 500M, 10%, 0
+                                Default: 0
+    --max-transfer <size>       Optional cap for this run (SizeSuffix like 2G).
+                                Note: the script will add a computed `--max-transfer` for the rclone invocation;
+                                use this option to further cap that value. The smaller limit will be used.
+    --precmd '<cmd>'            Command to run before starting the transfer (runs only if a transfer will occur
+                                and when not in `--dry-run`).
+    --postcmd '<cmd>'           Command to run after a successful transfer (runs only if files were moved and not in
+                                `--dry-run`). SIGINT (Ctrl-C) will skip postcmd; SIGHUP/SIGTERM will run the postcmd.
+                                This allows consistent behavior when running from systemd, but more manual control when
+                                running from a terminal.
+    --dry-run                   Script-level dry run: the script will pass `--dry-run` to rclone (unless you already
+                                included it), and precmd/postcmd will be skipped.
+    --debug                     Save raw captured rclone output to /tmp/auto_move_rclone_output_<ts>.log.
+    --help                      Show this help and exit.
+
+Rclone args:
+    Any remaining/non-script args are passed directly to `rclone move`. For deterministic detection of
+    per-file activity prefer: `--use-json-log --log-file /tmp/rclone.json` in the rclone args and also use
+    `--debug` for the script so the raw capture is saved.
+
+Notes & examples:
+    - Units: accepts both SI (K, M, G = 1000^n) and IEC (KiB, MiB, GiB = 1024^n) forms for size inputs.
+    - By default the script will compute and add `--max-transfer <computed>` to the rclone command.
+      Avoid passing conflicting `--max-transfer` or `--max-duration` rclone flags unless you know the interaction.
+    - Use `--debug` + `--use-json-log --log-file` to diagnose transfer-detection issues.
+Examples:
+    auto_move.sh --src /mnt/src --dest /mnt/dest --trigger 90 --target 85 --min-dest-space 5G --metadata -v
+    auto_move.sh --src /mnt/src --dest remote:bucket/path --trigger 90 --target 80 --max-transfer 2G --debug --use-json-log --log-file /tmp/rclone.json
+
+Exit codes (summary):
+    0   Success
+    2   Invalid / missing args (script-level)
+    28  Destination ran out of space (pre-check or rclone write failure)
+    <rclone exit codes>: propagated except 8 and 10, which are treated as partial success
+                        when transfer activity was observed in the rclone output.
+EOF
+exit 2
+}
+
 ran_precmd=false
 transfer_performed=false
 ran_out_of_space=false
@@ -72,39 +119,6 @@ log() {
     echo "$progname: $*"
 }
 
-usage() {
-        cat <<'EOF'
-Usage: rclone_auto_move.sh --src <src> --dest <dest> [--trigger <percent>] [--target <percent>] [--min-dest-space <size|%>] [--precmd '<cmd>'] [--postcmd '<cmd>'] [--debug] [rclone args]
-
-Single-run wrapper: runs one `rclone move` when `--src` usage >= `--trigger`.
-
-Options:
-    --min-dest-space <size|%>   Minimum free space to keep on destination (size or percent).
-    --max-transfer <size>       Optional cap for this run (rclone SizePrefix supported, e.g. 2G).
-    --precmd '<cmd>'            Command to run before the transfer (runs only if transfer will occur).
-    --postcmd '<cmd>'           Command to run after a successful transfer (runs only if transfer occurred).
-    --debug                     Save raw rclone capture to /tmp for debugging.
-    --dry-run                   Don't perform transfers (passed to rclone; precmd/postcmd skipped).
-    --help                      Show this help and exit.
-
-    Any non-script arguments are passed directly to `rclone move` (the script
-    will always add `--max-transfer` based on internal caps but otherwise preserves
-    user flags; the script does not add `--stats` or `--use-json-log` automatically).
-
-Examples:
-    rclone_auto_move.sh --src /mnt/src --dest /mnt/dest --trigger 90 --target 85 --min-dest-space 5G --metadata -v
-    rclone_auto_move.sh --src /mnt/src --dest remote:bucket/path --trigger 90 --target 80 --max-transfer 2G --debug --use-json-log --log-file /tmp/rclone.json
-
-Notes:
-    - The script detects transfers by parsing rclone JSON logs or human-readable
-        INFO/NOTICE lines. For deterministic JSON detection pass
-        `--use-json-log --log-file <path>` in the rclone args (recommended when
-        debugging).
-    - SIGINT (interactive Ctrl-C) will skip `--postcmd`; SIGTERM/SIGHUP will run it.
-    - Exit code 28 indicates destination ran out of space.
-EOF
-    exit 2
-}
 
 # Parse args
 while [[ $# -gt 0 ]]; do
@@ -127,6 +141,12 @@ done
 
 [ -z "$src" ] && { log "Missing --src"; usage; }
 [ -z "$dest" ] && { log "Missing --dest"; usage; }
+
+# Ensure rclone binary is available
+if ! command -v rclone >/dev/null 2>&1; then
+    log "Error: rclone not found in PATH."
+    exit 127
+fi
 
 is_remote() {
     local p="$1"
@@ -293,7 +313,7 @@ finalize_and_exit() {
     # Save tmp capture only in debug mode, then always clean up the temp file.
     if [ -n "${tmp_output:-}" ] && [ -f "$tmp_output" ]; then
         if [ "$debug" = true ]; then
-            outsave="/tmp/rclone_auto_move_rclone_output_$(date +%s).log"
+            outsave="/tmp/auto_move_rclone_output_$(date +%s).log"
             cp -f "$tmp_output" "$outsave" 2>/dev/null || true
             log "Saved raw rclone output to $outsave"
         fi
