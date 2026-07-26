@@ -22,6 +22,8 @@ set -o pipefail
 # Do NOT set -e so we can run cleanup and postcmd reliably.
 
 progname="$(basename "$0")"
+logtofile=false
+logpath="/dev/null"
 
 # Defaults / options
 src=""
@@ -100,6 +102,7 @@ EOF
 exit 2
 }
 
+# Defaults
 ran_precmd=false
 transfer_performed=false
 ran_out_of_space=false
@@ -116,9 +119,18 @@ else
 fi
 
 log() {
-    echo "$progname: $*"
-}
+    local message=""
+    # Check if there is piped input
+    # Read from stdin, default to empty if read fails
+    [ -p /dev/stdin ] && read -r message || message=""  
+    # If no piped input, check for the first argument
+    [[ -z "$message" && $# -gt 0 ]] && message="$@"
 
+    # log to journal or console
+    echo "$message"
+    # log to file with timestamp
+    [[ "$logtofile" = true ]] && { echo "$(date) : $message" >> "$logpath"; }
+}
 
 # Parse args
 while [[ $# -gt 0 ]]; do
@@ -331,7 +343,7 @@ finalize_and_exit() {
                 log "postcmd output: $output"
             else
                 post_status=$?
-                log "postcmd failed with exit code $post_status"
+                log "postcmd failed (code $post_status)"
             fi
         fi
     fi
@@ -446,9 +458,9 @@ else
     if [ "$cap" -le 0 ]; then
         log "Calculated transfer cap is zero; nothing to transfer."
     else
-        batch_bytes="$cap"
-        batch_size_str=$(bytes_to_rclone_size "$batch_bytes")
-        log "Transfer caps: dest_avail=$dest_avail min_dest=$min_dest_bytes transferrable=$transferrable needed_for_target=$needed_bytes user_max=${user_max_transfer:-unset} final_max_transfer=$batch_size_str"
+        log "Transfer caps: dest_avail=$dest_avail ($(bytes_to_rclone_size "$dest_avail")) min_dest=$min_dest_bytes ($(bytes_to_rclone_size "$min_dest_bytes")) \
+transferrable=$transferrable ($(bytes_to_rclone_size "$transferrable")) needed_for_target=$needed_bytes ($(bytes_to_rclone_size "$needed_bytes")) \
+user_max=${user_max_transfer:-unset} final_max_transfer=$cap ($(bytes_to_rclone_size "$cap"))"
 
         if [ "$ran_precmd" = false ] && [ -n "$precmd" ] && [ "$dryrun" = false ]; then
             log "Running precmd: $precmd"
@@ -456,14 +468,14 @@ else
                 log "precmd output: $output"
             else
                 rc=$?
-                log "precmd failed with exit code $rc, aborting."
+                log "precmd failed (code $rc), aborting."
                 exit $rc
             fi
             ran_precmd=true
         fi
 
         # Build rclone argument list and include --dry-run in the args array
-        rclone_args=(--max-transfer "$batch_size_str")
+        rclone_args=(--max-transfer "$cap")
         if [ "$dryrun" = true ]; then
             # Avoid duplicating --dry-run if user passed it in trailing rclone args
             found=false
